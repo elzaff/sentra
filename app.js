@@ -1,11 +1,12 @@
 // SENTRA (powered by CMRE): the working app.
 // Photos go to the Modal backend (code/product/modal_pilah.py) for placement; sessions, items and photos stay on this
-// device (IndexedDB). Officer confirmations and corrections are also sent to the backend for later evaluation.
+// device (IndexedDB) and are mirrored to Supabase: everyone can read, only the admin login can upload or change data.
+// Officer confirmations and corrections are also sent to the backend for later evaluation.
 // Two kinds of session share one model: setoran (one depositor, phone, gets a receipt) and batch (many photos, manifest).
 (() => {
   "use strict";
-  const API = new URLSearchParams(location.search).get("api") || "https://yaraxoaraal--cmre-pilah-pilah-web.us-east.modal.run";
-  const PHOTO = new URLSearchParams(location.search).get("photo") || "https://yaraxoaraal--cmre-pilah-photo.us-east.modal.run";  // stored photos: GET /p/{pid} redirects to a short-lived signed URL
+  const API = new URLSearchParams(location.search).get("api") || "https://kwazawaja--cmre-pilah-pilah-web.us-east.modal.run";
+  const PHOTO = new URLSearchParams(location.search).get("photo") || "https://kwazawaja--cmre-pilah-photo.us-east.modal.run";  // stored photos: GET /p/{pid} redirects to a short-lived signed URL
   const E = window.EWASTE, C = E.clusters;
   const CAT = { baterai: "Baterai", layar: "Layar dan monitor", besar: "Peralatan besar", kecil: "Peralatan kecil", ti: "TI dan telekomunikasi", komponen: "Komponen dan PCB" };
   const CHUNK = 8, SIDE = 768;
@@ -31,18 +32,92 @@
     const t = db.transaction(store, mode), q = fn(t.objectStore(store));
     t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error);
   }));
-  const save = (store, v) => tx(store, "readwrite", s => s.put(v)).catch(e => toast("Gagal menyimpan: " + e.message));
-  const drop = (store, k) => tx(store, "readwrite", s => s.delete(k));
+  const save = (store, v) => { cloud(store, v); return tx(store, "readwrite", s => s.put(v)).catch(e => toast("Gagal menyimpan: " + e.message)); };
+  const drop = (store, k) => { cloud(store, { id: k }, true); return tx(store, "readwrite", s => s.delete(k)); };
   const putS = s => { S.set(s.id, s); return save("sessions", s); };
   const putI = it => { I.set(it.id, it); return save("items", it); };
   // local blob first (instant, offline); the stored copy in the bucket is the fallback when the blob is gone
   const imgURL = it => it.src || urls.get(it.id) || (it.img ? urls.set(it.id, URL.createObjectURL(it.img)).get(it.id) : it.pid ? `${PHOTO}/p/${it.pid}` : "");
   const itemsOf = sid => [...I.values()].filter(i => i.sid === sid).sort((a, b) => a.t - b.t);
-  const unit = () => { try { return JSON.parse(localStorage.getItem("cmre-unit")) || {}; } catch { return {}; } };
-  // new kinds found by the officer through "Kategori baru" (stored on this device)
-  const types = () => { try { return JSON.parse(localStorage.getItem("erase-types")) || []; } catch { return []; } };
-  const saveTypes = t => { try { localStorage.setItem("erase-types", JSON.stringify(t)); } catch {} };
+  const cache = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch { return d; } };
+  let UN = read("cmre-unit", {}), TY = read("erase-types", []);  // device cache; the cloud copy replaces it at start
+  const unit = () => UN;
+  const saveUnit = u => { UN = u; cache("cmre-unit", u); cloud("settings", { id: "unit", ...u }); };
+  // new kinds found by the officer through "Kategori baru"
+  const types = () => TY;
+  const saveTypes = t => { TY.filter(x => !t.some(y => y.id === x.id)).forEach(x => cloud("types", x, true)); TY = t; cache("erase-types", t); t.forEach(x => cloud("types", x)); };
   const typeOf = id => types().find(t => t.id === id);
+
+  // ================= cloud: Supabase. Public read; writes need the admin login (enforced by RLS and the Modal backend) =================
+  const SB = "https://qshhmvuuqjuxullvston.supabase.co", SBK = "sb_publishable_fp8qYzvg3SfM8pWwr67TQQ_MY_ifJYe";  // the key is public by design
+  const sbH = (tok, extra) => ({ apikey: SBK, ...(tok && { Authorization: "Bearer " + tok }), ...extra });
+  let auth = null;
+  try { auth = JSON.parse(localStorage.getItem("sentra-auth")); } catch {}
+  const setAuth = a => {
+    auth = a;
+    try { a ? localStorage.setItem("sentra-auth", JSON.stringify(a)) : localStorage.removeItem("sentra-auth"); } catch {}
+    document.querySelectorAll("[data-login]").forEach(b => { b.textContent = a ? "Keluar" : "Masuk"; });
+  };
+  setAuth(auth);
+  async function grant(body) {
+    const r = await fetch(`${SB}/auth/v1/token?grant_type=${body.password ? "password" : "refresh_token"}`, { method: "POST", headers: sbH(null, { "Content-Type": "application/json" }), body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(r.status === 400 ? "Username atau password salah." : j.msg || r.statusText);
+    setAuth({ at: j.access_token, rt: j.refresh_token, exp: j.expires_at });
+  }
+  async function token() {  // null when signed out; refreshed a minute before it expires
+    if (!auth) return null;
+    if (auth.exp - 60 < Date.now() / 1000) { try { await grant({ refresh_token: auth.rt }); } catch { setAuth(null); return null; } }
+    return auth.at;
+  }
+  const authH = async () => { const t = await token(); return t ? { Authorization: "Bearer " + t } : {}; };
+  // Uji and demo sessions never leave the device
+  const local = (store, v) => store === "sessions" ? v.type === "uji" || v.demo : S.get(v.sid)?.type === "uji" || S.get(v.sid)?.demo;
+  async function cloud(store, v, del) {
+    const t = await token();
+    if (!t || (!del && local(store, v))) return;  // a failed write is retried at the next start (see pull)
+    const { img, ...doc } = v;  // the photo blob stays on the device; the bucket holds the copy
+    fetch(`${SB}/rest/v1/${store}` + (del ? `?id=eq.${encodeURIComponent(v.id)}` : "?on_conflict=id"), del
+      ? { method: "DELETE", headers: sbH(t) }
+      : { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }), body: JSON.stringify({ id: v.id, doc, updated_at: new Date().toISOString() }) }).catch(() => {});
+  }
+  // shortcut: cloud rows win over local ones and only the first 1000 rows load, upgrade to paging + updated_at compare if the data grows
+  const pull = () => Promise.all(["sessions", "items", "types", "settings"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
+  const merge = (mine, theirs) => { const m = new Map(mine.map(x => [x.id, x])); theirs.forEach(d => m.set(d.id, { ...d, ...(m.get(d.id)?.img && { img: m.get(d.id).img }) })); return [...m.values()]; };
+
+  let after = "#/";  // where to go once signed in
+  function goLogin() { if (location.hash !== "#/masuk") after = location.hash || "#/"; location.hash = "#/masuk"; }
+  function masuk() {
+    if (auth) return location.replace("#/");
+    main.innerHTML = `<div class="page auth"><div class="authcard">
+      <img src="assets/mark.svg" alt="" width="44" height="44">
+      <div><h1>Masuk</h1><p class="muted">Semua halaman bisa dilihat tanpa masuk. Masuk hanya untuk upload foto dan mengubah data.</p></div>
+      <form class="login" novalidate>
+        <label class="f">Username<input type="text" name="u" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+        <label class="f">Password<input type="password" name="p" autocomplete="current-password" required></label>
+        <p class="autherr" data-err role="alert" hidden></p>
+        <button class="btn pri" type="submit">Masuk</button>
+      </form>
+      <a href="${esc(after)}" class="small">Lanjut tanpa masuk (hanya melihat)</a></div></div>`;
+    const form = main.querySelector("form.login"), btn = form.querySelector("button"), err = form.querySelector("[data-err]");
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
+      const u = form.elements.u.value.trim();
+      if (!u || !form.elements.p.value) { err.textContent = "Isi username dan password."; err.hidden = false; return; }
+      btn.disabled = true; btn.textContent = "Memeriksa…"; err.hidden = true;
+      try { await grant({ email: u.includes("@") ? u : u + "@sentrahub.tech", password: form.elements.p.value }); location.hash = after; location.reload(); }
+      catch (x) { err.textContent = x.message; err.hidden = false; btn.disabled = false; btn.textContent = "Masuk"; }
+    });
+  }
+  // UI gate: reading stays open, anything that uploads or edits asks for the login first (the real lock is server side)
+  const MUT = "[data-new],[data-conf],[data-learn],[data-dconf],[data-dlearn],[data-ddel],[data-act=quick-cam],[data-act=quick-files],[data-act=cam],[data-act=files],[data-act=pick-dir],[data-act=unit],[data-act=discover],[data-act=not-ewaste],[data-act=learn-all],[data-act=retry],[data-act=bulk],[data-act=finish],[data-act=reopen]";
+  const gate = sel => e => { if (auth || !e.target.closest(sel)) return; e.preventDefault(); e.stopPropagation(); goLogin(); };
+  document.addEventListener("click", gate(MUT), true);
+  document.addEventListener("change", gate("[data-dcorr],[data-dqty],[data-dkg]"), true);
+  document.addEventListener("submit", gate("form.name"), true);
+  document.addEventListener("drop", gate("[data-drop]"), true);
+  document.addEventListener("click", e => { if (e.target.closest("[data-login]")) { if (auth) { setAuth(null); location.reload(); } else goLogin(); } });
 
   // ================= domain: which bin an item goes to =================
   const isRes = it => it.state === "hasil";
@@ -123,8 +198,8 @@
   }
   function feedback(it) {
     if (S.get(it.sid).demo || !online || !it.conf) return;
-    fetch(API + "/feedback", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score }) }).catch(() => {});
+    token().then(t => t && fetch(`${SB}/rest/v1/feedback`, { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+      body: JSON.stringify({ doc: { predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score } }) })).catch(() => {});
   }
 
   // ---- photos: EXIF rotation applied, longest side 768 px (the pipeline drafts to 768 before resizing)
@@ -139,6 +214,7 @@
   const queue = [];
   let pumping = false;
   async function addFiles(sid, files, meta) {  // meta: optional [{ lab, source }] aligned with files (Uji metode)
+    if (!auth) return goLogin();
     const keep = [...files].map((f, k) => [f, meta ? meta[k] : {}]).filter(([f]) => f.type.startsWith("image/") || /\.(jpe?g|png|webp|heic)$/i.test(f.name));
     if (!keep.length) return;
     let bad = 0;
@@ -164,7 +240,7 @@
       const fd = new FormData();
       part.forEach(it => { fd.append("files", it.img, it.name.replace(/\.\w+$/, "") + ".jpg"); fd.append("keep", S.get(it.sid)?.type === "uji" ? "0" : "1"); });  // Uji photos stay off the server
       try {
-        const r = await fetch(API + "/predict", { method: "POST", body: fd, signal: AbortSignal.timeout(240000) });
+        const r = await fetch(API + "/predict", { method: "POST", headers: await authH(), body: fd, signal: AbortSignal.timeout(240000) });
         const j = await r.json();
         if (!r.ok) throw new Error(j.detail || r.statusText);
         part.forEach((it, k) => { const { name, pid, ...res } = j.results[k]; it.res = res; it.pid = pid || it.pid || null; it.state = "hasil"; putI(it); });
@@ -193,7 +269,7 @@
   }
   // learned kinds are listed too, so a slip in this dropdown can be undone and a photo can be filed into one by hand
   const corrOptions = sel => `<option value="">Koreksi kategori…</option>${C.map(c => `<option value="${c.id}" ${sel === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
-    ${types().length ? `<optgroup label="Kategori baru di perangkat ini">${types().map(t => `<option value="t:${t.id}" ${sel === "t:" + t.id ? "selected" : ""}>${esc(t.name)} (${t.b3 ? "B3" : "non-B3"})</option>`).join("")}</optgroup>` : ""}
+    ${types().length ? `<optgroup label="Kategori baru">${types().map(t => `<option value="t:${t.id}" ${sel === "t:" + t.id ? "selected" : ""}>${esc(t.name)} (${t.b3 ? "B3" : "non-B3"})</option>`).join("")}</optgroup>` : ""}
     <option value="bukan" ${sel === "bukan" ? "selected" : ""}>Bukan e-waste</option><option value="lain" ${sel === "lain" ? "selected" : ""}>Kategori lain (tidak ada di daftar)</option>`;
   const parseCorr = v => v === "bukan" || v === "lain" ? v : Number(v);
 
@@ -223,7 +299,7 @@
     view = {};
     if (h[0] === "cara-kerja") return location.replace("#/riset/cara-kerja");  // old links: the walkthrough moved into the dashboard
     if (h[0] === "riset") return dashboard();
-    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup }[h[0]] || home)();
+    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup, masuk: masuk }[h[0]] || home)();
   }
 
   // ================= views =================
@@ -273,7 +349,7 @@
   function history() {
     const ss = [...S.values()].sort((a, b) => b.created - a.created), all = ss.flatMap(s => itemsOf(s.id)), g = byRoute(all), max = Math.max(1, ...g.map(r => r.n));
     main.innerHTML = `<div class="page">
-      <div class="head"><div class="t"><h1>Riwayat</h1><p class="meta">${ss.length} sesi tersimpan di perangkat ini.</p></div>
+      <div class="head"><div class="t"><h1>Riwayat</h1><p class="meta">${ss.length} sesi tersimpan.</p></div>
         <div class="acts"><button class="btn" type="button" data-act="unit">Atur unit & petugas</button><button class="btn" type="button" data-act="csv-all" ${all.length ? "" : "disabled"}>${ico("doc")}Unduh semua (CSV)</button></div></div>
       ${all.length ? sumLine(tally(all)) : ""}
       ${g.length ? `<section><div class="sechead"><h2>Per jalur</h2></div><div class="bars">${g.map(r => `<div class="bar-r">${tag(r)}<span class="tr"><i class="${r.cls}" style="width:${100 * r.n / max}%"></i></span><span class="n">${r.n}</span></div>`).join("")}</div></section>` : ""}
@@ -322,7 +398,7 @@
   function latest(it) {
     const r = route(it), h = held(it), t = suggest(it);
     if (t) return `<div class="latest" aria-live="polite"><img src="${imgURL(it)}" alt="">
-      <div style="min-width:0"><div class="to">Mirip kategori baru di perangkat ini</div>${typeTag(t, true)}
+      <div style="min-width:0"><div class="to">Mirip kategori baru</div>${typeTag(t, true)}
         <div class="kind">${esc(t.name)}</div>
         <p>Foto ini di luar 16 kategori BDC, tapi dekat dengan barang yang sudah kamu namai ${esc(t.name)}.</p>
         <div class="acts"><button class="btn ok sm" type="button" data-learn="${it.id}">${ico("check")}Ya, ${esc(t.name)}</button><button class="btn sm" type="button" data-open="${it.id}">Periksa</button></div></div></div>`;
@@ -342,7 +418,7 @@
       body = `<div><div class="k">${h ? "Jangan masukkan dulu" : "Masukkan ke wadah"}</div>${tag(r, true)}</div>
         <div><div class="k">${h ? "Paling mirip" : it.conf === "koreksi" ? "Dikoreksi petugas" : "Kategori"}</div><div class="g">${esc(kindName(it))}</div>
           <p class="hand">${h ? "Foto ini out-of-distribution (jauh dari semua foto BDC). Konfirmasi kategorinya atau koreksi." : typeof it.corr === "string" ? "Catat kategorinya secara manual." : esc(cl(it).handling)}</p></div>
-        ${t && !s.done ? `<div><div class="k">Mirip kategori baru di perangkat ini</div>${typeTag(t, true)}
+        ${t && !s.done ? `<div><div class="k">Mirip kategori baru</div>${typeTag(t, true)}
           <p class="hand">Dekat dengan barang yang sudah kamu namai ${esc(t.name)}.</p>
           <button class="btn ok" type="button" data-dlearn style="margin-top:10px">${ico("check")}Ya, ${esc(t.name)}</button></div>` : ""}
         ${s.done ? "" : `<div class="confirm"><button class="btn${t ? "" : " ok"}" type="button" data-dconf>${ico("check")}${h ? "Ya, kategorinya ini" : "Benar"}</button>
@@ -369,7 +445,7 @@
       k ? toType(it, k) : setConf(it, "koreksi", parseCorr(v)); learnt = null; detail(it); render(); });
     q("[data-dqty]")?.addEventListener("change", e => { it.qty = Math.max(1, Math.round(+e.target.value || 1)); putI(it); render(); });
     q("[data-dkg]")?.addEventListener("change", e => { it.kg = e.target.value === "" ? null : Math.max(0, +e.target.value); putI(it); render(); });
-    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); if (it.pid) fetch(`${PHOTO}/p/${it.pid}`, { method: "DELETE" }).catch(() => {}); dlg.close(); render(); toast("Barang dihapus."); });
+    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); if (it.pid) authH().then(h => fetch(`${PHOTO}/p/${it.pid}`, { method: "DELETE", headers: h })).catch(() => {}); dlg.close(); render(); toast("Barang dihapus."); });
     if (!dlg.open) dlg.showModal();
   }
 
@@ -403,7 +479,7 @@
     main.innerHTML = `<div class="page">
       <div class="head"><div class="t"><h1>Kategori</h1><p class="meta">SENTRA mengenali 16 kategori. Kategori ini hasil clustering 3.792 foto BDC tanpa label; tim memberi nama sesudahnya. <a href="#/riset/k17">Peta 16 cluster dan alasan memilih K = 16 ada di dashboard riset.</a></p></div></div>
       ${group("Jalur B3", C.filter(c => c.b3))}${group("Jalur non-B3", C.filter(c => !c.b3))}
-      <section class="jgroup"><div class="sechead"><h2>Kategori baru di perangkat ini</h2><a href="#/baru">Cluster barang yang perlu dicek</a></div>
+      <section class="jgroup"><div class="sechead"><h2>Kategori baru</h2><a href="#/baru">Cluster barang yang perlu dicek</a></div>
         ${types().length ? `<div class="rows">${types().map(t => `<div class="srow"><span>${tag({ label: (t.b3 ? "B3 · " : "Non-B3 · ") + t.name, cls: t.b3 ? "b3" : "" })}</span>
           <span class="r">${[...I.values()].filter(i => i.newType === t.id).length} barang · ditemukan ${short(t.created)}</span></div>`).join("")}</div>`
           : `<p class="empty">Belum ada. Barang yang tidak cocok dengan 16 kategori masuk status perlu dicek, lalu bisa di-cluster jadi kategori baru.</p>`}</section></div>`;
@@ -479,7 +555,7 @@
     if (btn) { btn.disabled = true; btn.textContent = "Clustering…"; }
     if (!online && !(await ping())) { toast("Server AI offline."); return render(); }
     try {
-      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
+      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || r.statusText);
       found = { ...j, ids: P.map(i => i.id) };
@@ -566,7 +642,7 @@
       <label class="f">Nama petugas<input type="text" name="officer" maxlength="60" value="${esc(u.officer || "")}"></label>
       <div class="acts"><button class="btn" type="button" data-close>Batal</button><button class="btn pri" type="submit">Simpan</button></div></form>`;
     const f = dlg.querySelector("form");
-    f.addEventListener("submit", e => { e.preventDefault(); try { localStorage.setItem("cmre-unit", JSON.stringify({ unit: f.unit.value.trim(), officer: f.officer.value.trim() })); } catch {} dlg.close(); render(); });
+    f.addEventListener("submit", e => { e.preventDefault(); saveUnit({ unit: f.unit.value.trim(), officer: f.officer.value.trim() }); dlg.close(); render(); });
     dlg.showModal();
   }
 
@@ -688,9 +764,21 @@
   addEventListener("hashchange", () => { if (dlg.open) dlg.close(); render(); if (!main.hidden) main.focus({ preventScroll: true }); scrollTo(0, 0); });
 
   // ================= start =================
-  Promise.all([tx("sessions", "readonly", s => s.getAll()), tx("items", "readonly", s => s.getAll())]).then(([ss, its]) => {
+  Promise.all([tx("sessions", "readonly", s => s.getAll()), tx("items", "readonly", s => s.getAll()), pull()]).then(([ss, its, remote]) => {
+    let up = [];  // local rows the cloud lacks, pushed once S is filled (cloud() needs the session to skip Uji items)
+    if (remote) {
+      const have = new Set(remote.flat().map(d => d.id));
+      up = [...ss.filter(v => !have.has(v.id)).map(v => ["sessions", v]), ...its.filter(v => !have.has(v.id)).map(v => ["items", v])];
+      ss = merge(ss, remote[0]); its = merge(its, remote[1]);
+      up.push(...TY.filter(v => !have.has(v.id)).map(v => ["types", v]));
+      TY = merge(TY, remote[2]); cache("erase-types", TY);
+      const cu = remote[3].find(d => d.id === "unit");
+      if (cu) { UN = { unit: cu.unit, officer: cu.officer }; cache("cmre-unit", UN); }
+      else if (UN.unit || UN.officer) up.push(["settings", { id: "unit", ...UN }]);
+    }
     ss.forEach(s => S.set(s.id, s));
     its.forEach(i => { if (i.state === "proses") i.state = "gagal"; I.set(i.id, i); });  // uploads cut off by a reload can be retried
+    up.forEach(([store, v]) => cloud(store, v));
     // one kind per name and route: merge twins saved before same-name kinds were reused
     const keep = new Map(), ts = types();
     ts.forEach(t => { const k = t.name.toLowerCase() + (t.b3 ? "|b3" : "");

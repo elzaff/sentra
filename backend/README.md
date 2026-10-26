@@ -43,7 +43,6 @@ Deploy tidak menyalakan GPU. GPU (satu L4) baru menyala saat foto dikirim dan ma
 
 ## Endpoint
 
-`GET /health`, `POST /predict` (foto), `POST /discover` (cluster ulang barang "perlu dicek"), `POST /feedback`,
-`GET /feedback/summary`. Layanan foto: `GET /health`, `GET /p/{pid}`, `DELETE /p/{pid}`.
+`GET /health`, `POST /predict` (foto), `POST /discover` (cluster ulang barang "perlu dicek"). Layanan foto: `GET /health`, `GET /p/{pid}`, `DELETE /p/{pid}`.
 
 `artifacts.npz` berisi proyeksi CMRE, PCA-32, 16 centroid, dan threshold OOD hasil `build_artifacts.py` di repo riset utama.
