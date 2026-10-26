@@ -5,6 +5,7 @@
 (() => {
   "use strict";
   const API = new URLSearchParams(location.search).get("api") || "https://yaraxoaraal--cmre-pilah-pilah-web.us-east.modal.run";
+  const PHOTO = new URLSearchParams(location.search).get("photo") || "https://yaraxoaraal--cmre-pilah-photo.us-east.modal.run";  // stored photos: GET /p/{pid} redirects to a short-lived signed URL
   const E = window.EWASTE, C = E.clusters;
   const CAT = { baterai: "Baterai", layar: "Layar dan monitor", besar: "Peralatan besar", kecil: "Peralatan kecil", ti: "TI dan telekomunikasi", komponen: "Komponen dan PCB" };
   const CHUNK = 8, SIDE = 768;
@@ -34,7 +35,8 @@
   const drop = (store, k) => tx(store, "readwrite", s => s.delete(k));
   const putS = s => { S.set(s.id, s); return save("sessions", s); };
   const putI = it => { I.set(it.id, it); return save("items", it); };
-  const imgURL = it => it.src || urls.get(it.id) || (it.img ? urls.set(it.id, URL.createObjectURL(it.img)).get(it.id) : "");
+  // local blob first (instant, offline); the stored copy in the bucket is the fallback when the blob is gone
+  const imgURL = it => it.src || urls.get(it.id) || (it.img ? urls.set(it.id, URL.createObjectURL(it.img)).get(it.id) : it.pid ? `${PHOTO}/p/${it.pid}` : "");
   const itemsOf = sid => [...I.values()].filter(i => i.sid === sid).sort((a, b) => a.t - b.t);
   const unit = () => { try { return JSON.parse(localStorage.getItem("cmre-unit")) || {}; } catch { return {}; } };
   // new kinds found by the officer through "Kategori baru" (stored on this device)
@@ -160,12 +162,12 @@
       }
       const part = queue.splice(0, CHUNK).map(id => I.get(id)).filter(Boolean);
       const fd = new FormData();
-      part.forEach(it => fd.append("files", it.img, it.name.replace(/\.\w+$/, "") + ".jpg"));
+      part.forEach(it => { fd.append("files", it.img, it.name.replace(/\.\w+$/, "") + ".jpg"); fd.append("keep", S.get(it.sid)?.type === "uji" ? "0" : "1"); });  // Uji photos stay off the server
       try {
         const r = await fetch(API + "/predict", { method: "POST", body: fd, signal: AbortSignal.timeout(240000) });
         const j = await r.json();
         if (!r.ok) throw new Error(j.detail || r.statusText);
-        part.forEach((it, k) => { const { name, ...res } = j.results[k]; it.res = res; it.state = "hasil"; putI(it); });
+        part.forEach((it, k) => { const { name, pid, ...res } = j.results[k]; it.res = res; it.pid = pid || it.pid || null; it.state = "hasil"; putI(it); });
       } catch (e) {
         part.forEach(it => { it.state = "gagal"; putI(it); });
         toast("Sebagian foto gagal diproses: " + e.message);
@@ -367,7 +369,7 @@
       k ? toType(it, k) : setConf(it, "koreksi", parseCorr(v)); learnt = null; detail(it); render(); });
     q("[data-dqty]")?.addEventListener("change", e => { it.qty = Math.max(1, Math.round(+e.target.value || 1)); putI(it); render(); });
     q("[data-dkg]")?.addEventListener("change", e => { it.kg = e.target.value === "" ? null : Math.max(0, +e.target.value); putI(it); render(); });
-    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); dlg.close(); render(); toast("Barang dihapus."); });
+    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); if (it.pid) fetch(`${PHOTO}/p/${it.pid}`, { method: "DELETE" }).catch(() => {}); dlg.close(); render(); toast("Barang dihapus."); });
     if (!dlg.open) dlg.showModal();
   }
 
@@ -432,8 +434,9 @@
       content.innerHTML = doc.querySelector("#dataError").outerHTML + doc.querySelector(".tip").outerHTML + doc.querySelector("main").innerHTML;
       root.append(style, content);
       if (!window.DEMO) await loadScript("demo.js?v=5");
+      if (!window.GRAPH) await loadScript("graph.js?v=1");
       window.__researchRoot = root;
-      try { await loadScript("riset.js?v=3"); } finally { delete window.__researchRoot; }
+      try { await loadScript("riset.js?v=4"); } finally { delete window.__researchRoot; }
     })().catch(e => {
       const root = researchContent.shadowRoot;
       if (root) root.textContent = "Dashboard riset gagal dimuat: " + e.message;

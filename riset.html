@@ -385,6 +385,28 @@ footer { padding: 24px 0 32px; font-size: 13px; color: var(--muted); text-align:
 .research a[href="./"] { display: none !important; }
 .research .wrap { width: calc(100% - 48px); }
 @media (max-width: 720px) { .research .wrap { width: calc(100% - 28px); } }
+/* graph kNN view */
+.gcv { width: 100%; height: auto; display: block; }
+.ggrid { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 28px; align-items: start; }
+@media (max-width: 960px) { .ggrid { grid-template-columns: 1fr; } }
+.gstats { margin: 0; display: grid; gap: 14px; }
+.gstats div { border-top: 1px solid var(--line); padding-top: 12px; }
+.gstats div:first-child { border-top: 0; padding-top: 0; }
+.gstats dt { font-size: 13px; color: var(--muted); }
+.gstats dd { margin: 2px 0 0; font-size: 22px; font-weight: 700; color: #10293d; font-variant-numeric: tabular-nums; }
+.gstats dd small { display: block; font-size: 13px; font-weight: 500; color: var(--muted); }
+.gpair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 28px; }
+@media (max-width: 760px) { .gpair { grid-template-columns: 1fr; } }
+.gcards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 24px; }
+@media (max-width: 1000px) { .gcards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 720px) { .gcards { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 420px) { .gcards { grid-template-columns: 1fr; } }
+.gcard { display: block; width: 100%; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 10px 10px 12px; cursor: pointer; font: inherit; color: inherit; }
+.gcard:hover { border-color: var(--green); }
+.gcard:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.gcard canvas { border-radius: 10px; background: var(--cream); }
+.gcard .t { display: block; font-weight: 600; font-size: 14px; line-height: 1.35; color: #10293d; margin: 10px 2px 4px; }
+.gcard .m { display: block; font-size: 13px; color: var(--muted); margin: 0 2px; }
 .navapp { margin-left: 6px; color: #fff !important; background: var(--green); }
 .navapp:hover { background: var(--forest) !important; }
 </style>
@@ -397,6 +419,7 @@ footer { padding: 24px 0 32px; font-size: 13px; color: var(--muted); text-align:
       <a href="#/riset/beranda" data-view="beranda">Peta</a>
       <a href="#/riset/coba" data-view="coba">Galeri uji</a>
       <a href="#/riset/kelompok" data-view="kelompok">16 cluster</a>
+      <a href="#/riset/graph" data-view="graph">Graph kNN</a>
       <a href="#/riset/cara-kerja" data-view="cara-kerja">Cara kerja CMRE</a>
       <a href="#/riset/analisis" data-view="analisis">Analisis</a>
       <a class="navapp" href="./">Buka SENTRA</a>
@@ -512,6 +535,7 @@ footer { padding: 24px 0 32px; font-size: 13px; color: var(--muted); text-align:
         <div>
           <ul class="k17list" id="k17list"></ul>
           <div class="k17thumbs" id="k17thumbs"></div>
+          <p style="margin:16px 0 0"><a class="btn" href="#/riset/graf-k17">Lihat perbedaannya di graph kNN</a></p>
         </div>
       </div>
     </div>
@@ -564,6 +588,66 @@ footer { padding: 24px 0 32px; font-size: 13px; color: var(--muted); text-align:
     <div class="facts2" id="dlgFacts"></div>
   </div>
 </dialog>
+
+<!-- ================= GRAPH kNN ================= -->
+<div class="view" data-view="graph" hidden>
+  <div class="wrap pagehead">
+    <p class="kicker">Graph kNN</p>
+    <h1 class="heading-lg">16 cluster adalah hasil memotong satu graph kemiripan.</h1>
+    <p class="lead">Tiap foto BDC menjadi satu node. Node dihubungkan ke 14 foto lain yang paling mirip menurut fitur CMRE (k = 15 ikut menghitung foto itu sendiri, sesuai bawaan scikit-learn). Spectral clustering lalu memotong graph ini menjadi K bagian sambil memutus edge sesedikit mungkin. Posisi node mengikuti peta t-SNE, jadi edge yang tampak panjang tetap menghubungkan dua foto yang dekat di ruang fitur.</p>
+  </div>
+  <section id="graf" style="padding-top:16px">
+    <div class="wrap">
+      <div class="ggrid">
+        <div class="k17map">
+          <div class="seg" role="group" aria-label="Tampilan graph" id="gMode" style="margin-bottom:10px">
+            <button class="btn" type="button" data-g="full">Graph utuh</button>
+            <button class="btn" type="button" data-g="16">Dipotong K = 16</button>
+            <button class="btn" type="button" data-g="17">Dipotong K = 17</button>
+          </div>
+          <div class="legend" id="gLegend"></div>
+          <canvas class="gcv" id="gFull" width="1000" height="860" role="img" aria-label="Graph kNN 3.792 foto BDC di atas peta t-SNE. Angka lengkapnya ada di tabel di bawah."></canvas>
+          <p class="csub" id="gCap" style="margin:10px 0 0"></p>
+        </div>
+        <dl class="gstats" id="gStats"></dl>
+      </div>
+      <div id="gStatsT" style="margin-top:18px"></div>
+    </div>
+  </section>
+
+  <section id="graf-k17" class="band">
+    <div class="wrap">
+      <p class="kicker">K = 16 dan K = 17 di graph yang sama</p>
+      <h2 class="heading-lg" id="gkTitle"></h2>
+      <p class="lead" id="gkLead" style="margin-top:14px"></p>
+      <div class="gpair">
+        <div class="k17map">
+          <p class="ctitle">K = 16</p>
+          <div class="legend" style="margin:8px 0"><span><i class="sw" style="background:#184e77"></i>C15</span><span><i class="sw" style="background:#c3cfd4"></i>cluster lain</span><span><i class="sw line" style="background:#d64545"></i>edge terpotong</span></div>
+          <canvas class="gcv" id="gk16" width="600" height="440" role="img" aria-label="Area C15 pada K = 16"></canvas>
+          <p class="csub" id="gk16cap" style="margin:10px 0 0"></p>
+        </div>
+        <div class="k17map">
+          <p class="ctitle">K = 17</p>
+          <div class="legend" style="margin:8px 0"><span><i class="sw" style="background:#184e77"></i>sisa C15</span><span><i class="sw" style="background:#7a5195"></i>cluster ke-17</span><span><i class="sw" style="background:#c3cfd4"></i>cluster lain</span><span><i class="sw line" style="background:#d64545"></i>edge terpotong</span></div>
+          <canvas class="gcv" id="gk17" width="600" height="440" role="img" aria-label="Area yang sama pada K = 17"></canvas>
+          <p class="csub" id="gk17cap" style="margin:10px 0 0"></p>
+        </div>
+      </div>
+      <div id="gkT" style="margin-top:18px"></div>
+    </div>
+  </section>
+
+  <section id="graf-cluster">
+    <div class="wrap">
+      <p class="kicker">Graph tiap cluster · K = 16</p>
+      <h2 class="heading-lg" id="gcTitle"></h2>
+      <p class="lead" style="margin-top:14px">Tiap panel memperbesar satu cluster. Garis berwarna adalah edge di dalam cluster. Garis merah adalah edge yang terpotong, menuju foto di cluster lain (titik abu-abu). <b>Conductance</b> = bobot edge terpotong dibagi total bobot edge yang menyentuh cluster; makin kecil, makin terpisah cluster itu. Edge dua arah berbobot 1, edge satu arah 0,5. Pilih panel untuk membuka galeri fotonya.</p>
+      <div class="gcards" id="gCards"></div>
+      <div id="gCardsT" style="margin-top:18px"></div>
+    </div>
+  </section>
+</div>
 
 <!-- ================= CARA KERJA CMRE ================= -->
 <div class="view" data-view="cara-kerja" hidden>
@@ -878,6 +962,7 @@ footer { padding: 24px 0 32px; font-size: 13px; color: var(--muted); text-align:
 
 <script src="data.js?v=5"></script>
 <script src="demo.js?v=5"></script>
-<script src="riset.js?v=2"></script>
+<script src="graph.js?v=1"></script>
+<script src="riset.js?v=3"></script>
 </body>
 </html>

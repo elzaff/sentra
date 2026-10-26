@@ -804,8 +804,153 @@
       t.onkeydown = e => { const n = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key]; if (n != null) { e.preventDefault(); pickTab((n + tabs.length) % tabs.length, true); } }; });
   })();
 
-  // ================= ROUTER: five views, analysis sub-tabs, and in-page anchors =================
-  const VIEWS = ["beranda", "coba", "kelompok", "cara-kerja", "analisis"];
+  // ================= GRAPH kNN: the graph spectral clustering cuts (graph.js), K = 16 vs 17, one panel per cluster =================
+  (() => {
+    const G = window.GRAPH;
+    if (!G) { $("gCap").textContent = "Data graph (graph.js) tidak termuat."; return; }
+    const P = E.clusterMap, N = P.length, raw = atob(G.edges), u8 = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) u8[i] = raw.charCodeAt(i);
+    const ed = new Uint16Array(u8.buffer), M = ed.length / 2, wt = e => e < G.nMutual ? 1 : .5;  // mutual edges come first
+    const L16 = P.map(p => p[2]), L17 = G.k17, NEW = 16, CUT = "#d64545", NEWCOL = "#7a5195", OTHER = "#c3cfd4";
+    const num = v => v.toLocaleString("id-ID");
+    const col = c => c === NEW ? NEWCOL : CATCOLORS[C[c].cat];
+    const deg = new Uint16Array(N);
+    for (let e = 0; e < M; e++) { deg[ed[2 * e]]++; deg[ed[2 * e + 1]]++; }
+
+    // per-cluster cut statistics; conductance = cut weight / volume (sum of weighted degrees), as in the normalized cut
+    const stats = (L, K) => {
+      const cl = Array.from({ length: K }, () => ({ n: 0, inner: 0, cut: 0, wIn: 0, wCut: 0, to: new Map() }));
+      L.forEach(c => cl[c].n++);
+      for (let e = 0; e < M; e++) {
+        const a = L[ed[2 * e]], b = L[ed[2 * e + 1]], w = wt(e);
+        if (a === b) { cl[a].inner++; cl[a].wIn += w; continue; }
+        for (const [p, q] of [[a, b], [b, a]]) { cl[p].cut++; cl[p].wCut += w; cl[p].to.set(q, (cl[p].to.get(q) || 0) + 1); }
+      }
+      cl.forEach(c => { c.cond = c.wCut / (2 * c.wIn + c.wCut); c.top = [...c.to].sort((x, y) => y[1] - x[1])[0]; });
+      const cut = cl.reduce((s, c) => s + c.cut, 0) / 2, conds = cl.map(c => c.cond);
+      return { cl, cut, kept: M - cut, mean: conds.reduce((s, v) => s + v, 0) / K, max: Math.max(...conds) };
+    };
+    const S16 = stats(L16, 16), S17 = stats(L17, 17);
+
+    // canvas painter: data box -> logical canvas, equal x/y scale (t-SNE has no preferred axis); edges batched by colour
+    const setup = cv => { const W = +cv.getAttribute("width"), H = +cv.getAttribute("height"), r = Math.min(2, devicePixelRatio || 1);
+      cv.width = W * r; cv.height = H * r; const ctx = cv.getContext("2d"); ctx.scale(r, r); return { cv, ctx, W, H }; };
+    // q trims t-SNE outliers (a few members sit far from their cluster) so the dense core fills the panel
+    const boxOf = (ids, pad = .06, q = 0) => { const xs = ids.map(i => P[i][0]).sort((a, b) => a - b), ys = ids.map(i => P[i][1]).sort((a, b) => a - b);
+      const lo = Math.floor(q * (ids.length - 1)), hi = Math.ceil((1 - q) * (ids.length - 1));
+      const x0 = xs[lo], x1 = xs[hi], y0 = ys[lo], y1 = ys[hi], px = (x1 - x0) * pad || 1, py = (y1 - y0) * pad || 1;
+      return [x0 - px, x1 + px, y0 - py, y1 + py]; };
+    const paint = (c, box, edges, nodes) => {
+      const { ctx, W, H } = c, [a, b, y0, y1] = box, s = Math.min(W / (b - a), H / (y1 - y0)), ox = (W - s * (b - a)) / 2, oy = (H - s * (y1 - y0)) / 2;
+      const X = i => ox + s * (P[i][0] - a), Y = i => H - oy - s * (P[i][1] - y0);
+      c.X = X; c.Y = Y; ctx.clearRect(0, 0, W, H);
+      for (const { list, color, alpha, lw } of edges) {
+        const by = new Map(); for (const e of list) { const k = color(e); (by.get(k) || by.set(k, []).get(k)).push(e); }
+        ctx.globalAlpha = alpha; ctx.lineWidth = lw;
+        for (const [k, es] of by) { ctx.strokeStyle = k; ctx.beginPath();
+          for (const e of es) { const i = ed[2 * e], j = ed[2 * e + 1]; ctx.moveTo(X(i), Y(i)); ctx.lineTo(X(j), Y(j)); } ctx.stroke(); }
+      }
+      ctx.globalAlpha = 1;
+      for (const { list, color, r } of nodes) for (const i of list) { ctx.fillStyle = color(i); ctx.beginPath(); ctx.arc(X(i), Y(i), r, 0, 7); ctx.fill(); }
+    };
+    const label = (c, ids, text) => {  // at the member closest to the cluster mean, white halo like the SVG maps
+      const mx = ids.reduce((s, i) => s + c.X(i), 0) / ids.length, my = ids.reduce((s, i) => s + c.Y(i), 0) / ids.length;
+      const i = ids.reduce((b, k) => Math.hypot(c.X(k) - mx, c.Y(k) - my) < Math.hypot(c.X(b) - mx, c.Y(b) - my) ? k : b);
+      // 20 logical px: the 1000-px canvas renders at ~1/2 size on laptops and ~1/3 on phones
+      const { ctx } = c; ctx.font = "700 20px 'Plus Jakarta Sans', sans-serif"; ctx.textAlign = "center"; ctx.lineJoin = "round";
+      ctx.lineWidth = 6; ctx.strokeStyle = "#fff"; ctx.strokeText(text, c.X(i), c.Y(i) + 7); ctx.fillStyle = "#10293d"; ctx.fillText(text, c.X(i), c.Y(i) + 7);
+    };
+    const all = Array.from({ length: M }, (_, e) => e), ids = Array.from({ length: N }, (_, i) => i);
+    const members = (L, K) => Array.from({ length: K }, (_, c) => ids.filter(i => L[i] === c));
+    const M16 = members(L16, 16), M17 = members(L17, 17);
+    const isCut = (L, e) => L[ed[2 * e]] !== L[ed[2 * e + 1]];
+
+    // ---- 1. whole graph: uncut, cut at 16, cut at 17
+    const full = setup($("gFull")), fullBox = boxOf(ids, .02);
+    let mode = "16";
+    const drawFull = m => {
+      mode = m;
+      root.querySelectorAll("#gMode [data-g]").forEach(b => b.setAttribute("aria-pressed", b.dataset.g === m));
+      if (m === "full") {
+        paint(full, fullBox, [{ list: all, color: () => CONTEXT, alpha: .12, lw: .6 }], [{ list: ids, color: () => "#6b7d87", r: 1.5 }]);
+        $("gLegend").innerHTML = `<span><i class="sw" style="background:#6b7d87"></i>foto BDC (node)</span><span><i class="sw line" style="background:${CONTEXT}"></i>edge kNN</span>`;
+        $("gCap").textContent = `Sebelum dipotong: ${num(N)} node dan ${num(M)} edge. ${num(G.nMutual)} edge (${pct(G.nMutual / M)}) dua arah, sisanya satu arah.`;
+      } else {
+        const L = m === "16" ? L16 : L17, K = +m, S = m === "16" ? S16 : S17;
+        paint(full, fullBox, [{ list: all.filter(e => !isCut(L, e)), color: e => col(L[ed[2 * e]]), alpha: .22, lw: .6 }, { list: all.filter(e => isCut(L, e)), color: () => CUT, alpha: .5, lw: .8 }],
+          [{ list: ids, color: i => col(L[i]), r: 1.7 }]);
+        (m === "16" ? M16 : M17).forEach((ms, c) => label(full, ms, c === NEW ? "ke-17" : `C${c}`));
+        $("gLegend").innerHTML = [...new Set(C.map(c => c.cat))].map(k => `<span><i class="sw" style="background:${CATCOLORS[k]}"></i>${CATNAME[k]}</span>`).join("") +
+          (K === 17 ? `<span><i class="sw" style="background:${NEWCOL}"></i>cluster ke-17</span>` : "") + `<span><i class="sw line" style="background:${CUT}"></i>edge terpotong</span>`;
+        $("gCap").textContent = `Dipotong menjadi ${K} cluster: ${num(S.kept)} edge (${pct(S.kept / M)}) tetap di dalam cluster, ${num(S.cut)} edge terpotong (merah).`;
+      }
+      const S = mode === "17" ? S17 : S16;
+      $("gStats").innerHTML = [["Node (foto BDC)", num(N), ""], ["Edge", num(M), `${num(G.nMutual)} dua arah · ${num(M - G.nMutual)} satu arah`],
+        ["Edge per foto", fmt(2 * M / N, 1), "rata-rata derajat node"],
+        ...(mode === "full" ? [] : [["Edge terpotong", num(S.cut), `${pct(S.cut / M)} dari semua edge`], ["Conductance rata-rata", fmt(S.mean), `terbesar ${fmt(S.max)}`]])]
+        .map(([t, v, s]) => `<div><dt>${t}</dt><dd>${v}${s ? `<small>${s}</small>` : ""}</dd></div>`).join("");
+    };
+    root.querySelectorAll("#gMode [data-g]").forEach(b => b.onclick = () => drawFull(b.dataset.g));
+    drawFull("16");
+    table("gStatsT", ["K", "Edge di dalam cluster", "Edge terpotong", "Bagian edge terpotong", "Conductance rata-rata", "Conductance terbesar"],
+      [[16, S16], [17, S17]].map(([k, S]) => [String(k), num(S.kept), num(S.cut), pct(S.cut / M), S.mean, S.max]));
+    full.cv.addEventListener("mousemove", e => {
+      const b = full.cv.getBoundingClientRect(), x = (e.clientX - b.left) * full.W / b.width, y = (e.clientY - b.top) * full.H / b.height;
+      let best = -1, bd = 64;  // nearest node within 8 logical px
+      for (let i = 0; i < N; i++) { const d = (full.X(i) - x) ** 2 + (full.Y(i) - y) ** 2; if (d < bd) { bd = d; best = i; } }
+      if (best < 0) return hideTip();
+      const c = (mode === "17" ? L17 : L16)[best];
+      showTip(mode === "full" ? `<b>Satu foto BDC</b><br>${deg[best]} edge` : `<b>${c === NEW ? "Cluster ke-17" : `C${c} · ${C[c].name}`}</b><br>${deg[best]} edge dari foto ini`, e.clientX, e.clientY);
+    });
+    full.cv.addEventListener("mouseleave", hideTip);
+
+    // ---- 2. K = 16 vs K = 17, zoomed on C15 and the photos that form the 17th cluster
+    const zone = ids.filter(i => L16[i] === 15 || L17[i] === NEW), zset = new Set(zone), zBox = boxOf(zone, .08, .02);
+    const touch = all.filter(e => zset.has(ed[2 * e]) || zset.has(ed[2 * e + 1]));
+    const near = [...new Set(touch.flatMap(e => [ed[2 * e], ed[2 * e + 1]]))];
+    const pair = (cv, L, colorOf) => { const c = setup($(cv)), cut = touch.filter(e => isCut(L, e));
+      paint(c, zBox, [{ list: touch.filter(e => !isCut(L, e)), color: e => colorOf(ed[2 * e]), alpha: .25, lw: .7 }, { list: cut, color: () => CUT, alpha: .55, lw: .8 }],
+        [{ list: near, color: colorOf, r: 2.1 }]);
+      return cut.length; };
+    const c16 = pair("gk16", L16, i => L16[i] === 15 ? FOCUS : OTHER), c17 = pair("gk17", L17, i => L17[i] === NEW ? NEWCOL : L17[i] === 15 ? FOCUS : OTHER);
+    const from = [...M17[NEW].reduce((m, i) => m.set(L16[i], (m.get(L16[i]) || 0) + 1), new Map())].sort((a, b) => b[1] - a[1]);
+    const broke = all.filter(e => !isCut(L16, e) && isCut(L17, e)).length, joined = all.filter(e => isCut(L16, e) && !isCut(L17, e)).length;
+    const k17s = E.scen.k17.find(k => k.k === 17), k16s = E.scen.k17.find(k => k.k === 16), top3 = from.slice(0, 3).map(([c, n]) => `C${c} (${n} foto)`);
+    $("gkTitle").textContent = `Cluster ke-17 mengambil foto dari ${from.length} cluster, tidak hanya dari C15.`;
+    $("gkLead").innerHTML = `Dari sisi graph, K = 17 tidak lebih buruk: edge yang terpotong ${num(S17.cut)}, sedikit lebih sedikit dari ${num(S16.cut)} pada K = 16.
+      Bedanya ada pada isi cluster. ${num(M17[NEW].length)} foto cluster ke-17 terutama datang dari ${top3.slice(0, -1).join(", ")}, dan ${top3.at(-1)}: foto tumpukan dan area pengumpulan dengan background serupa.
+      Pemotongan baru memutus ${num(broke)} edge yang pada K = 16 berada di dalam satu cluster, dan menyatukan ${num(joined)} edge yang tadinya terpotong.
+      Jadi alasan memakai K = 16 bukan jumlah edge terpotong, melainkan stabilitas dan background bias (kaitan dengan gaya foto naik dari ${fmt(k16s.style, 2)} ke ${fmt(k17s.style, 2)}). Rinciannya ada di <a href="#/riset/k17">halaman 16 cluster</a>.`;
+    $("gk16cap").textContent = `${num(c16)} edge terpotong menyentuh area ini. C15 berisi ${num(M16[15].length)} foto.`;
+    $("gk17cap").textContent = `${num(c17)} edge terpotong menyentuh area ini. Sisa C15 ${num(M17[15].length)} foto, cluster ke-17 ${num(M17[NEW].length)} foto.`;
+    table("gkT", ["Asal di K = 16", "Nama cluster", "Foto yang pindah ke cluster ke-17"], from.map(([c, n]) => [`C${c}`, C[c].name, String(n)]));
+
+    // ---- 3. one panel per K = 16 cluster: inner edges in the cluster colour, cut edges in red to grey outside nodes
+    const inner = Array.from({ length: 16 }, () => []), out = Array.from({ length: 16 }, () => []);
+    for (let e = 0; e < M; e++) { const a = L16[ed[2 * e]], b = L16[ed[2 * e + 1]]; if (a === b) inner[a].push(e); else { out[a].push(e); out[b].push(e); } }
+    const worst = S16.cl.reduce((b, s, c) => s.cond > S16.cl[b].cond ? c : b, 0);
+    $("gcTitle").textContent = `${pct(S16.kept / M)} edge tetap di dalam cluster-nya. C${worst} paling banyak terhubung ke cluster lain.`;
+    const host = $("gCards");
+    C.forEach(cl => {
+      const c = cl.id, s = S16.cl[c], b = document.createElement("button");
+      b.className = "gcard"; b.type = "button";
+      b.setAttribute("aria-label", `C${c} ${cl.name}: ${s.n} foto, ${s.inner} edge di dalam, ${s.cut} edge terpotong, conductance ${fmt(s.cond)}. Buka galeri`);
+      b.innerHTML = `<canvas class="gcv" width="320" height="220" aria-hidden="true"></canvas><span class="t">C${c} · ${cl.name}</span>
+        <span class="m num">${s.n} foto · ${num(s.inner)} edge di dalam · conductance ${fmt(s.cond)}</span>
+        <span class="m num">${s.cut ? `${s.cut} edge terpotong, terbanyak ke C${s.top[0]} (${s.top[1]})` : "tidak ada edge terpotong"}</span>`;
+      const outside = [...new Set(out[c].flatMap(e => [ed[2 * e], ed[2 * e + 1]]).filter(i => L16[i] !== c))];
+      paint(setup(b.querySelector("canvas")), boxOf(M16[c], .12, .03),
+        [{ list: inner[c], color: () => col(c), alpha: .35, lw: .7 }, { list: out[c], color: () => CUT, alpha: .6, lw: .8 }],
+        [{ list: outside, color: () => "#9aa9b1", r: 1.8 }, { list: M16[c], color: () => col(c), r: 2 }]);
+      b.onclick = () => openCluster(cl, b);
+      host.appendChild(b);
+    });
+    table("gCardsT", ["Cluster", "Nama", "Foto", "Edge di dalam", "Edge terpotong", "Conductance", "Terbanyak ke"],
+      C.map(cl => { const s = S16.cl[cl.id]; return [`C${cl.id}`, cl.name, String(s.n), num(s.inner), String(s.cut), s.cond, s.top ? `C${s.top[0]} (${s.top[1]})` : "–"]; }));
+  })();
+
+  // ================= ROUTER: six views, analysis sub-tabs, and in-page anchors =================
+  const VIEWS = ["beranda", "coba", "kelompok", "graph", "cara-kerja", "analisis"];
   const subBtns = [...root.querySelectorAll(".subnav [data-sub]")];
   const showSub = s => { subBtns.forEach(b => { const on = b.dataset.sub === s; b.setAttribute("aria-selected", on); b.tabIndex = on ? 0 : -1; });
     root.querySelectorAll(".sub").forEach(p => p.hidden = p.dataset.sub !== s); };
