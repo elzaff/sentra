@@ -39,10 +39,14 @@
   // local blob first (instant, offline); the stored copy in the bucket is the fallback when the blob is gone
   const imgURL = it => it.src || urls.get(it.id) || (it.img ? urls.set(it.id, URL.createObjectURL(it.img)).get(it.id) : it.pid ? `${PHOTO}/p/${it.pid}` : "");
   const itemsOf = sid => [...I.values()].filter(i => i.sid === sid).sort((a, b) => a.t - b.t);
-  const unit = () => { try { return JSON.parse(localStorage.getItem("cmre-unit")) || {}; } catch { return {}; } };
-  // new kinds found by the officer through "Kategori baru" (stored on this device)
-  const types = () => { try { return JSON.parse(localStorage.getItem("erase-types")) || []; } catch { return []; } };
-  const saveTypes = t => { try { localStorage.setItem("erase-types", JSON.stringify(t)); } catch {} };
+  const cache = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch { return d; } };
+  let UN = read("cmre-unit", {}), TY = read("erase-types", []);  // device cache; the cloud copy replaces it at start
+  const unit = () => UN;
+  const saveUnit = u => { UN = u; cache("cmre-unit", u); cloud("settings", { id: "unit", ...u }); };
+  // new kinds found by the officer through "Kategori baru"
+  const types = () => TY;
+  const saveTypes = t => { TY.filter(x => !t.some(y => y.id === x.id)).forEach(x => cloud("types", x, true)); TY = t; cache("erase-types", t); t.forEach(x => cloud("types", x)); };
   const typeOf = id => types().find(t => t.id === id);
 
   // ================= cloud: Supabase. Public read; writes need the admin login (enforced by RLS and the Modal backend) =================
@@ -79,7 +83,7 @@
       : { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }), body: JSON.stringify({ id: v.id, doc, updated_at: new Date().toISOString() }) }).catch(() => {});
   }
   // shortcut: cloud rows win over local ones and only the first 1000 rows load, upgrade to paging + updated_at compare if the data grows
-  const pull = () => Promise.all(["sessions", "items"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
+  const pull = () => Promise.all(["sessions", "items", "types", "settings"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
   const merge = (mine, theirs) => { const m = new Map(mine.map(x => [x.id, x])); theirs.forEach(d => m.set(d.id, { ...d, ...(m.get(d.id)?.img && { img: m.get(d.id).img }) })); return [...m.values()]; };
 
   let after = "#/";  // where to go once signed in
@@ -107,7 +111,7 @@
     });
   }
   // UI gate: reading stays open, anything that uploads or edits asks for the login first (the real lock is server side)
-  const MUT = "[data-new],[data-conf],[data-learn],[data-dconf],[data-dlearn],[data-ddel],[data-act=quick-cam],[data-act=quick-files],[data-act=cam],[data-act=files],[data-act=pick-dir],[data-act=discover],[data-act=not-ewaste],[data-act=learn-all],[data-act=retry],[data-act=bulk],[data-act=finish],[data-act=reopen]";
+  const MUT = "[data-new],[data-conf],[data-learn],[data-dconf],[data-dlearn],[data-ddel],[data-act=quick-cam],[data-act=quick-files],[data-act=cam],[data-act=files],[data-act=pick-dir],[data-act=unit],[data-act=discover],[data-act=not-ewaste],[data-act=learn-all],[data-act=retry],[data-act=bulk],[data-act=finish],[data-act=reopen]";
   const gate = sel => e => { if (auth || !e.target.closest(sel)) return; e.preventDefault(); e.stopPropagation(); goLogin(); };
   document.addEventListener("click", gate(MUT), true);
   document.addEventListener("change", gate("[data-dcorr],[data-dqty],[data-dkg]"), true);
@@ -194,8 +198,8 @@
   }
   function feedback(it) {
     if (S.get(it.sid).demo || !online || !it.conf) return;
-    authH().then(h => fetch(API + "/feedback", { method: "POST", headers: { "Content-Type": "application/json", ...h },
-      body: JSON.stringify({ predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score }) })).catch(() => {});
+    token().then(t => t && fetch(`${SB}/rest/v1/feedback`, { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "return=minimal" }),
+      body: JSON.stringify({ doc: { predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score } }) })).catch(() => {});
   }
 
   // ---- photos: EXIF rotation applied, longest side 768 px (the pipeline drafts to 768 before resizing)
@@ -265,7 +269,7 @@
   }
   // learned kinds are listed too, so a slip in this dropdown can be undone and a photo can be filed into one by hand
   const corrOptions = sel => `<option value="">Koreksi kategori…</option>${C.map(c => `<option value="${c.id}" ${sel === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}
-    ${types().length ? `<optgroup label="Kategori baru di perangkat ini">${types().map(t => `<option value="t:${t.id}" ${sel === "t:" + t.id ? "selected" : ""}>${esc(t.name)} (${t.b3 ? "B3" : "non-B3"})</option>`).join("")}</optgroup>` : ""}
+    ${types().length ? `<optgroup label="Kategori baru">${types().map(t => `<option value="t:${t.id}" ${sel === "t:" + t.id ? "selected" : ""}>${esc(t.name)} (${t.b3 ? "B3" : "non-B3"})</option>`).join("")}</optgroup>` : ""}
     <option value="bukan" ${sel === "bukan" ? "selected" : ""}>Bukan e-waste</option><option value="lain" ${sel === "lain" ? "selected" : ""}>Kategori lain (tidak ada di daftar)</option>`;
   const parseCorr = v => v === "bukan" || v === "lain" ? v : Number(v);
 
@@ -345,7 +349,7 @@
   function history() {
     const ss = [...S.values()].sort((a, b) => b.created - a.created), all = ss.flatMap(s => itemsOf(s.id)), g = byRoute(all), max = Math.max(1, ...g.map(r => r.n));
     main.innerHTML = `<div class="page">
-      <div class="head"><div class="t"><h1>Riwayat</h1><p class="meta">${ss.length} sesi tersimpan di perangkat ini.</p></div>
+      <div class="head"><div class="t"><h1>Riwayat</h1><p class="meta">${ss.length} sesi tersimpan.</p></div>
         <div class="acts"><button class="btn" type="button" data-act="unit">Atur unit & petugas</button><button class="btn" type="button" data-act="csv-all" ${all.length ? "" : "disabled"}>${ico("doc")}Unduh semua (CSV)</button></div></div>
       ${all.length ? sumLine(tally(all)) : ""}
       ${g.length ? `<section><div class="sechead"><h2>Per jalur</h2></div><div class="bars">${g.map(r => `<div class="bar-r">${tag(r)}<span class="tr"><i class="${r.cls}" style="width:${100 * r.n / max}%"></i></span><span class="n">${r.n}</span></div>`).join("")}</div></section>` : ""}
@@ -394,7 +398,7 @@
   function latest(it) {
     const r = route(it), h = held(it), t = suggest(it);
     if (t) return `<div class="latest" aria-live="polite"><img src="${imgURL(it)}" alt="">
-      <div style="min-width:0"><div class="to">Mirip kategori baru di perangkat ini</div>${typeTag(t, true)}
+      <div style="min-width:0"><div class="to">Mirip kategori baru</div>${typeTag(t, true)}
         <div class="kind">${esc(t.name)}</div>
         <p>Foto ini di luar 16 kategori BDC, tapi dekat dengan barang yang sudah kamu namai ${esc(t.name)}.</p>
         <div class="acts"><button class="btn ok sm" type="button" data-learn="${it.id}">${ico("check")}Ya, ${esc(t.name)}</button><button class="btn sm" type="button" data-open="${it.id}">Periksa</button></div></div></div>`;
@@ -414,7 +418,7 @@
       body = `<div><div class="k">${h ? "Jangan masukkan dulu" : "Masukkan ke wadah"}</div>${tag(r, true)}</div>
         <div><div class="k">${h ? "Paling mirip" : it.conf === "koreksi" ? "Dikoreksi petugas" : "Kategori"}</div><div class="g">${esc(kindName(it))}</div>
           <p class="hand">${h ? "Foto ini out-of-distribution (jauh dari semua foto BDC). Konfirmasi kategorinya atau koreksi." : typeof it.corr === "string" ? "Catat kategorinya secara manual." : esc(cl(it).handling)}</p></div>
-        ${t && !s.done ? `<div><div class="k">Mirip kategori baru di perangkat ini</div>${typeTag(t, true)}
+        ${t && !s.done ? `<div><div class="k">Mirip kategori baru</div>${typeTag(t, true)}
           <p class="hand">Dekat dengan barang yang sudah kamu namai ${esc(t.name)}.</p>
           <button class="btn ok" type="button" data-dlearn style="margin-top:10px">${ico("check")}Ya, ${esc(t.name)}</button></div>` : ""}
         ${s.done ? "" : `<div class="confirm"><button class="btn${t ? "" : " ok"}" type="button" data-dconf>${ico("check")}${h ? "Ya, kategorinya ini" : "Benar"}</button>
@@ -475,7 +479,7 @@
     main.innerHTML = `<div class="page">
       <div class="head"><div class="t"><h1>Kategori</h1><p class="meta">SENTRA mengenali 16 kategori. Kategori ini hasil clustering 3.792 foto BDC tanpa label; tim memberi nama sesudahnya. <a href="#/riset/k17">Peta 16 cluster dan alasan memilih K = 16 ada di dashboard riset.</a></p></div></div>
       ${group("Jalur B3", C.filter(c => c.b3))}${group("Jalur non-B3", C.filter(c => !c.b3))}
-      <section class="jgroup"><div class="sechead"><h2>Kategori baru di perangkat ini</h2><a href="#/baru">Cluster barang yang perlu dicek</a></div>
+      <section class="jgroup"><div class="sechead"><h2>Kategori baru</h2><a href="#/baru">Cluster barang yang perlu dicek</a></div>
         ${types().length ? `<div class="rows">${types().map(t => `<div class="srow"><span>${tag({ label: (t.b3 ? "B3 · " : "Non-B3 · ") + t.name, cls: t.b3 ? "b3" : "" })}</span>
           <span class="r">${[...I.values()].filter(i => i.newType === t.id).length} barang · ditemukan ${short(t.created)}</span></div>`).join("")}</div>`
           : `<p class="empty">Belum ada. Barang yang tidak cocok dengan 16 kategori masuk status perlu dicek, lalu bisa di-cluster jadi kategori baru.</p>`}</section></div>`;
@@ -638,7 +642,7 @@
       <label class="f">Nama petugas<input type="text" name="officer" maxlength="60" value="${esc(u.officer || "")}"></label>
       <div class="acts"><button class="btn" type="button" data-close>Batal</button><button class="btn pri" type="submit">Simpan</button></div></form>`;
     const f = dlg.querySelector("form");
-    f.addEventListener("submit", e => { e.preventDefault(); try { localStorage.setItem("cmre-unit", JSON.stringify({ unit: f.unit.value.trim(), officer: f.officer.value.trim() })); } catch {} dlg.close(); render(); });
+    f.addEventListener("submit", e => { e.preventDefault(); saveUnit({ unit: f.unit.value.trim(), officer: f.officer.value.trim() }); dlg.close(); render(); });
     dlg.showModal();
   }
 
@@ -766,6 +770,11 @@
       const have = new Set(remote.flat().map(d => d.id));
       up = [...ss.filter(v => !have.has(v.id)).map(v => ["sessions", v]), ...its.filter(v => !have.has(v.id)).map(v => ["items", v])];
       ss = merge(ss, remote[0]); its = merge(its, remote[1]);
+      up.push(...TY.filter(v => !have.has(v.id)).map(v => ["types", v]));
+      TY = merge(TY, remote[2]); cache("erase-types", TY);
+      const cu = remote[3].find(d => d.id === "unit");
+      if (cu) { UN = { unit: cu.unit, officer: cu.officer }; cache("cmre-unit", UN); }
+      else if (UN.unit || UN.officer) up.push(["settings", { id: "unit", ...UN }]);
     }
     ss.forEach(s => S.set(s.id, s));
     its.forEach(i => { if (i.state === "proses") i.state = "gagal"; I.set(i.id, i); });  // uploads cut off by a reload can be retried

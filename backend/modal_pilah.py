@@ -56,7 +56,6 @@ light = modal.Image.debian_slim(python_version="3.12").pip_install("boto3", "fas
 store = modal.Secret.from_name("BucketBiznnet")  # BIZNET_S3_ENDPOINT / REGION / BUCKET / ACCESS_KEY / SECRET_KEY
 app = modal.App("cmre-pilah", image=image)
 cache = modal.Volume.from_name("cmre-pilah-hf", create_if_missing=True)
-feedback = modal.Dict.from_name("cmre-pilah-feedback", create_if_missing=True)
 
 SIG = "google/siglip2-so400m-patch16-naflex"
 DINO = "facebook/dinov3-vith16plus-pretrain-lvd1689m"
@@ -252,18 +251,6 @@ class Pilah:
             return {"results": [dict(name=nm, pid=p, **r) for nm, p, r in zip(names, pids, out)],
                     "ms": round(1000 * (time.perf_counter() - t0))}
 
-        class Feedback(BaseModel):
-            predicted: int = Field(ge=0, le=15)
-            verdict: str = Field(pattern="^(benar|koreksi)$")
-            corrected: str = Field(default="", max_length=60)
-            note: str = Field(default="", max_length=200)
-            score: float = 0.0
-
-        @api.post("/feedback", dependencies=admin)
-        def give(fb: Feedback):
-            feedback[str(uuid.uuid4())] = {**fb.model_dump(), "t": int(time.time())}
-            return {"ok": True}
-
         class Discover(BaseModel):
             z: list[list[float]] = Field(min_length=4, max_length=400)
 
@@ -295,12 +282,6 @@ class Pilah:
                 groups.append(dict(members=m.tolist(), cohesion=round(coh, 3), nearest=int(dc.argmin()), nearestDist=round(float(dc.min()), 3)))
             groups.sort(key=lambda g: -len(g["members"]))
             return {"k": k, "silhouette": round(sil, 3) if k > 1 else None, "groups": groups}
-
-        @api.get("/feedback/summary")
-        def summary():
-            rows = list(feedback.values())
-            return {"total": len(rows), "benar": sum(r["verdict"] == "benar" for r in rows),
-                    "koreksi": sum(r["verdict"] == "koreksi" for r in rows)}
 
         return api
 
