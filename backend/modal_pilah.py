@@ -24,6 +24,27 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_FILES, MAX_BYTES = 24, 12 * 1024 * 1024
 ORIGINS = ["https://www.sentrahub.tech", "https://sentrahub.tech", "https://sentra-ewaste.vercel.app", "https://elzaff.github.io",
            "http://localhost:8766", "http://127.0.0.1:8766"]
+SUPABASE_URL, ADMIN_UID = "https://qshhmvuuqjuxullvston.supabase.co", "c9b675a2-553e-4ef7-88ec-29bd1ffd4e69"
+SUPABASE_KEY = "sb_publishable_fp8qYzvg3SfM8pWwr67TQQ_MY_ifJYe"  # public by design; the login itself is what is secret
+
+
+def admin_only():
+    """FastAPI dependency: reads stay open, but anything that spends GPU or writes needs the admin's Supabase login."""
+    import json
+    import urllib.request
+
+    from fastapi import Header, HTTPException
+
+    def check(authorization: str = Header("")):
+        req = urllib.request.Request(f"{SUPABASE_URL}/auth/v1/user", headers={"apikey": SUPABASE_KEY, "Authorization": authorization})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                uid = json.load(r).get("id")
+        except Exception:
+            raise HTTPException(401, "Login dulu.")
+        if uid != ADMIN_UID:
+            raise HTTPException(403, "Akun ini tidak punya akses.")
+    return check
 
 image = (modal.Image.debian_slim(python_version="3.12")
          .pip_install("torch==2.7.1", "transformers>=4.57,<5", "timm>=1.0.19", "huggingface_hub>=0.34", "pillow",
@@ -175,19 +196,20 @@ class Pilah:
 
         from concurrent.futures import ThreadPoolExecutor
 
-        from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+        from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
         from fastapi.middleware.cors import CORSMiddleware
         from PIL import Image, ImageOps
         from pydantic import BaseModel, Field
 
         api = FastAPI(title="CMRE Pilah")
+        admin = [Depends(admin_only())]
         api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
 
         @api.get("/health")
         def health():
             return {"ok": True, "clusters": int(len(self.a["centres"]))}
 
-        @api.post("/predict")
+        @api.post("/predict", dependencies=admin)
         async def predict(files: list[UploadFile] = File(...), keep: list[str] = Form(default=[])):
             """keep[i] == "1" stores files[i] in the bucket (Setoran/Batch); anything else leaves it unstored (Uji)."""
             if not 0 < len(files) <= MAX_FILES:
@@ -237,7 +259,7 @@ class Pilah:
             note: str = Field(default="", max_length=200)
             score: float = 0.0
 
-        @api.post("/feedback")
+        @api.post("/feedback", dependencies=admin)
         def give(fb: Feedback):
             feedback[str(uuid.uuid4())] = {**fb.model_dump(), "t": int(time.time())}
             return {"ok": True}
@@ -245,7 +267,7 @@ class Pilah:
         class Discover(BaseModel):
             z: list[list[float]] = Field(min_length=4, max_length=400)
 
-        @api.post("/discover")
+        @api.post("/discover", dependencies=admin)
         def discover(req: Discover):
             """Group held photos (CMRE embeddings kept on the device) into candidate new types. Small sets, so
             average-linkage cosine clustering with K picked by silhouette; one group when there is no structure."""
@@ -287,7 +309,7 @@ class Pilah:
 @modal.asgi_app()
 def photo():
     """Shows and deletes stored photos without waking the GPU. The bucket stays private: GET redirects to a presigned URL."""
-    from fastapi import FastAPI, HTTPException, Response
+    from fastapi import Depends, FastAPI, HTTPException, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import RedirectResponse
 
@@ -310,7 +332,7 @@ def photo():
         # browser may reuse the redirect for less than the URL lives, so a cached redirect never points at an expired link
         return RedirectResponse(url, 302, headers={"Cache-Control": f"private, max-age={PRESIGN_TTL // 3}"})
 
-    @api.delete("/p/{pid}", status_code=204)
+    @api.delete("/p/{pid}", status_code=204, dependencies=[Depends(admin_only())])
     def remove(pid: str):
         check(pid)
         s3().delete_object(Bucket=bucket(), Key=f"photos/{pid}.jpg")  # S3 delete is idempotent

@@ -1,11 +1,12 @@
 // SENTRA (powered by CMRE): the working app.
 // Photos go to the Modal backend (code/product/modal_pilah.py) for placement; sessions, items and photos stay on this
-// device (IndexedDB). Officer confirmations and corrections are also sent to the backend for later evaluation.
+// device (IndexedDB) and are mirrored to Supabase: everyone can read, only the admin login can upload or change data.
+// Officer confirmations and corrections are also sent to the backend for later evaluation.
 // Two kinds of session share one model: setoran (one depositor, phone, gets a receipt) and batch (many photos, manifest).
 (() => {
   "use strict";
-  const API = new URLSearchParams(location.search).get("api") || "https://yaraxoaraal--cmre-pilah-pilah-web.us-east.modal.run";
-  const PHOTO = new URLSearchParams(location.search).get("photo") || "https://yaraxoaraal--cmre-pilah-photo.us-east.modal.run";  // stored photos: GET /p/{pid} redirects to a short-lived signed URL
+  const API = new URLSearchParams(location.search).get("api") || "https://kwazawaja--cmre-pilah-pilah-web.us-east.modal.run";
+  const PHOTO = new URLSearchParams(location.search).get("photo") || "https://kwazawaja--cmre-pilah-photo.us-east.modal.run";  // stored photos: GET /p/{pid} redirects to a short-lived signed URL
   const E = window.EWASTE, C = E.clusters;
   const CAT = { baterai: "Baterai", layar: "Layar dan monitor", besar: "Peralatan besar", kecil: "Peralatan kecil", ti: "TI dan telekomunikasi", komponen: "Komponen dan PCB" };
   const CHUNK = 8, SIDE = 768;
@@ -31,8 +32,8 @@
     const t = db.transaction(store, mode), q = fn(t.objectStore(store));
     t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error);
   }));
-  const save = (store, v) => tx(store, "readwrite", s => s.put(v)).catch(e => toast("Gagal menyimpan: " + e.message));
-  const drop = (store, k) => tx(store, "readwrite", s => s.delete(k));
+  const save = (store, v) => { cloud(store, v); return tx(store, "readwrite", s => s.put(v)).catch(e => toast("Gagal menyimpan: " + e.message)); };
+  const drop = (store, k) => { cloud(store, { id: k }, true); return tx(store, "readwrite", s => s.delete(k)); };
   const putS = s => { S.set(s.id, s); return save("sessions", s); };
   const putI = it => { I.set(it.id, it); return save("items", it); };
   // local blob first (instant, offline); the stored copy in the bucket is the fallback when the blob is gone
@@ -43,6 +44,76 @@
   const types = () => { try { return JSON.parse(localStorage.getItem("erase-types")) || []; } catch { return []; } };
   const saveTypes = t => { try { localStorage.setItem("erase-types", JSON.stringify(t)); } catch {} };
   const typeOf = id => types().find(t => t.id === id);
+
+  // ================= cloud: Supabase. Public read; writes need the admin login (enforced by RLS and the Modal backend) =================
+  const SB = "https://qshhmvuuqjuxullvston.supabase.co", SBK = "sb_publishable_fp8qYzvg3SfM8pWwr67TQQ_MY_ifJYe";  // the key is public by design
+  const sbH = (tok, extra) => ({ apikey: SBK, ...(tok && { Authorization: "Bearer " + tok }), ...extra });
+  let auth = null;
+  try { auth = JSON.parse(localStorage.getItem("sentra-auth")); } catch {}
+  const setAuth = a => {
+    auth = a;
+    try { a ? localStorage.setItem("sentra-auth", JSON.stringify(a)) : localStorage.removeItem("sentra-auth"); } catch {}
+    document.querySelectorAll("[data-login]").forEach(b => { b.textContent = a ? "Keluar" : "Masuk"; });
+  };
+  setAuth(auth);
+  async function grant(body) {
+    const r = await fetch(`${SB}/auth/v1/token?grant_type=${body.password ? "password" : "refresh_token"}`, { method: "POST", headers: sbH(null, { "Content-Type": "application/json" }), body: JSON.stringify(body) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(r.status === 400 ? "Username atau password salah." : j.msg || r.statusText);
+    setAuth({ at: j.access_token, rt: j.refresh_token, exp: j.expires_at });
+  }
+  async function token() {  // null when signed out; refreshed a minute before it expires
+    if (!auth) return null;
+    if (auth.exp - 60 < Date.now() / 1000) { try { await grant({ refresh_token: auth.rt }); } catch { setAuth(null); return null; } }
+    return auth.at;
+  }
+  const authH = async () => { const t = await token(); return t ? { Authorization: "Bearer " + t } : {}; };
+  // Uji and demo sessions never leave the device
+  const local = (store, v) => store === "sessions" ? v.type === "uji" || v.demo : S.get(v.sid)?.type === "uji" || S.get(v.sid)?.demo;
+  async function cloud(store, v, del) {
+    const t = await token();
+    if (!t || (!del && local(store, v))) return;  // a failed write is retried at the next start (see pull)
+    const { img, ...doc } = v;  // the photo blob stays on the device; the bucket holds the copy
+    fetch(`${SB}/rest/v1/${store}` + (del ? `?id=eq.${encodeURIComponent(v.id)}` : "?on_conflict=id"), del
+      ? { method: "DELETE", headers: sbH(t) }
+      : { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }), body: JSON.stringify({ id: v.id, doc, updated_at: new Date().toISOString() }) }).catch(() => {});
+  }
+  // shortcut: cloud rows win over local ones and only the first 1000 rows load, upgrade to paging + updated_at compare if the data grows
+  const pull = () => Promise.all(["sessions", "items"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
+  const merge = (mine, theirs) => { const m = new Map(mine.map(x => [x.id, x])); theirs.forEach(d => m.set(d.id, { ...d, ...(m.get(d.id)?.img && { img: m.get(d.id).img }) })); return [...m.values()]; };
+
+  let after = "#/";  // where to go once signed in
+  function goLogin() { if (location.hash !== "#/masuk") after = location.hash || "#/"; location.hash = "#/masuk"; }
+  function masuk() {
+    if (auth) return location.replace("#/");
+    main.innerHTML = `<div class="page auth"><div class="authcard">
+      <img src="assets/mark.svg" alt="" width="44" height="44">
+      <div><h1>Masuk</h1><p class="muted">Semua halaman bisa dilihat tanpa masuk. Masuk hanya untuk upload foto dan mengubah data.</p></div>
+      <form class="login" novalidate>
+        <label class="f">Username<input type="text" name="u" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+        <label class="f">Password<input type="password" name="p" autocomplete="current-password" required></label>
+        <p class="autherr" data-err role="alert" hidden></p>
+        <button class="btn pri" type="submit">Masuk</button>
+      </form>
+      <a href="${esc(after)}" class="small">Lanjut tanpa masuk (hanya melihat)</a></div></div>`;
+    const form = main.querySelector("form.login"), btn = form.querySelector("button"), err = form.querySelector("[data-err]");
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
+      const u = form.elements.u.value.trim();
+      if (!u || !form.elements.p.value) { err.textContent = "Isi username dan password."; err.hidden = false; return; }
+      btn.disabled = true; btn.textContent = "Memeriksa…"; err.hidden = true;
+      try { await grant({ email: u.includes("@") ? u : u + "@sentrahub.tech", password: form.elements.p.value }); location.hash = after; location.reload(); }
+      catch (x) { err.textContent = x.message; err.hidden = false; btn.disabled = false; btn.textContent = "Masuk"; }
+    });
+  }
+  // UI gate: reading stays open, anything that uploads or edits asks for the login first (the real lock is server side)
+  const MUT = "[data-new],[data-conf],[data-learn],[data-dconf],[data-dlearn],[data-ddel],[data-act=quick-cam],[data-act=quick-files],[data-act=cam],[data-act=files],[data-act=pick-dir],[data-act=discover],[data-act=not-ewaste],[data-act=learn-all],[data-act=retry],[data-act=bulk],[data-act=finish],[data-act=reopen]";
+  const gate = sel => e => { if (auth || !e.target.closest(sel)) return; e.preventDefault(); e.stopPropagation(); goLogin(); };
+  document.addEventListener("click", gate(MUT), true);
+  document.addEventListener("change", gate("[data-dcorr],[data-dqty],[data-dkg]"), true);
+  document.addEventListener("submit", gate("form.name"), true);
+  document.addEventListener("drop", gate("[data-drop]"), true);
+  document.addEventListener("click", e => { if (e.target.closest("[data-login]")) { if (auth) { setAuth(null); location.reload(); } else goLogin(); } });
 
   // ================= domain: which bin an item goes to =================
   const isRes = it => it.state === "hasil";
@@ -123,8 +194,8 @@
   }
   function feedback(it) {
     if (S.get(it.sid).demo || !online || !it.conf) return;
-    fetch(API + "/feedback", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score }) }).catch(() => {});
+    authH().then(h => fetch(API + "/feedback", { method: "POST", headers: { "Content-Type": "application/json", ...h },
+      body: JSON.stringify({ predicted: it.res.cluster, verdict: it.conf, corrected: it.conf === "koreksi" ? kindName(it) : "", score: it.res.score }) })).catch(() => {});
   }
 
   // ---- photos: EXIF rotation applied, longest side 768 px (the pipeline drafts to 768 before resizing)
@@ -139,6 +210,7 @@
   const queue = [];
   let pumping = false;
   async function addFiles(sid, files, meta) {  // meta: optional [{ lab, source }] aligned with files (Uji metode)
+    if (!auth) return goLogin();
     const keep = [...files].map((f, k) => [f, meta ? meta[k] : {}]).filter(([f]) => f.type.startsWith("image/") || /\.(jpe?g|png|webp|heic)$/i.test(f.name));
     if (!keep.length) return;
     let bad = 0;
@@ -164,7 +236,7 @@
       const fd = new FormData();
       part.forEach(it => { fd.append("files", it.img, it.name.replace(/\.\w+$/, "") + ".jpg"); fd.append("keep", S.get(it.sid)?.type === "uji" ? "0" : "1"); });  // Uji photos stay off the server
       try {
-        const r = await fetch(API + "/predict", { method: "POST", body: fd, signal: AbortSignal.timeout(240000) });
+        const r = await fetch(API + "/predict", { method: "POST", headers: await authH(), body: fd, signal: AbortSignal.timeout(240000) });
         const j = await r.json();
         if (!r.ok) throw new Error(j.detail || r.statusText);
         part.forEach((it, k) => { const { name, pid, ...res } = j.results[k]; it.res = res; it.pid = pid || it.pid || null; it.state = "hasil"; putI(it); });
@@ -223,7 +295,7 @@
     view = {};
     if (h[0] === "cara-kerja") return location.replace("#/riset/cara-kerja");  // old links: the walkthrough moved into the dashboard
     if (h[0] === "riset") return dashboard();
-    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup }[h[0]] || home)();
+    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup, masuk: masuk }[h[0]] || home)();
   }
 
   // ================= views =================
@@ -369,7 +441,7 @@
       k ? toType(it, k) : setConf(it, "koreksi", parseCorr(v)); learnt = null; detail(it); render(); });
     q("[data-dqty]")?.addEventListener("change", e => { it.qty = Math.max(1, Math.round(+e.target.value || 1)); putI(it); render(); });
     q("[data-dkg]")?.addEventListener("change", e => { it.kg = e.target.value === "" ? null : Math.max(0, +e.target.value); putI(it); render(); });
-    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); if (it.pid) fetch(`${PHOTO}/p/${it.pid}`, { method: "DELETE" }).catch(() => {}); dlg.close(); render(); toast("Barang dihapus."); });
+    q("[data-ddel]")?.addEventListener("click", () => { I.delete(it.id); drop("items", it.id); if (it.pid) authH().then(h => fetch(`${PHOTO}/p/${it.pid}`, { method: "DELETE", headers: h })).catch(() => {}); dlg.close(); render(); toast("Barang dihapus."); });
     if (!dlg.open) dlg.showModal();
   }
 
@@ -479,7 +551,7 @@
     if (btn) { btn.disabled = true; btn.textContent = "Clustering…"; }
     if (!online && !(await ping())) { toast("Server AI offline."); return render(); }
     try {
-      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
+      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || r.statusText);
       found = { ...j, ids: P.map(i => i.id) };
@@ -688,9 +760,16 @@
   addEventListener("hashchange", () => { if (dlg.open) dlg.close(); render(); if (!main.hidden) main.focus({ preventScroll: true }); scrollTo(0, 0); });
 
   // ================= start =================
-  Promise.all([tx("sessions", "readonly", s => s.getAll()), tx("items", "readonly", s => s.getAll())]).then(([ss, its]) => {
+  Promise.all([tx("sessions", "readonly", s => s.getAll()), tx("items", "readonly", s => s.getAll()), pull()]).then(([ss, its, remote]) => {
+    let up = [];  // local rows the cloud lacks, pushed once S is filled (cloud() needs the session to skip Uji items)
+    if (remote) {
+      const have = new Set(remote.flat().map(d => d.id));
+      up = [...ss.filter(v => !have.has(v.id)).map(v => ["sessions", v]), ...its.filter(v => !have.has(v.id)).map(v => ["items", v])];
+      ss = merge(ss, remote[0]); its = merge(its, remote[1]);
+    }
     ss.forEach(s => S.set(s.id, s));
     its.forEach(i => { if (i.state === "proses") i.state = "gagal"; I.set(i.id, i); });  // uploads cut off by a reload can be retried
+    up.forEach(([store, v]) => cloud(store, v));
     // one kind per name and route: merge twins saved before same-name kinds were reused
     const keep = new Map(), ts = types();
     ts.forEach(t => { const k = t.name.toLowerCase() + (t.b3 ? "|b3" : "");

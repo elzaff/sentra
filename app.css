@@ -102,8 +102,8 @@ main::before { content: ""; position: absolute; z-index: -1; inset: 0 0 auto; he
 .btn.danger { color: var(--err); }
 .iconbtn { width: 40px; height: 40px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--card); color: var(--ink); display: inline-grid; place-items: center; cursor: pointer; flex: none; }
 .iconbtn:hover { background: var(--bg-2); }
-input[type=text], input[type=number], select { font: 500 15px var(--sans); color: var(--ink); background: var(--card); border: 1px solid var(--line-2); border-radius: 12px; min-height: 44px; padding: 0 12px; width: 100%; }
-input[type=text]:focus, input[type=number]:focus, select:focus { outline: none; border-color: var(--pri); box-shadow: 0 0 0 3px var(--pri-soft); }
+input[type=text], input[type=number], input[type=password], select { font: 500 15px var(--sans); color: var(--ink); background: var(--card); border: 1px solid var(--line-2); border-radius: 12px; min-height: 44px; padding: 0 12px; width: 100%; }
+input[type=text]:focus, input[type=number]:focus, input[type=password]:focus, select:focus { outline: none; border-color: var(--pri); box-shadow: 0 0 0 3px var(--pri-soft); }
 label.f { display: grid; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
 
 /* ---- bin tag: a pill with a dot in the bin colour */
@@ -352,3 +352,11 @@ form.name select { flex: 0 1 180px; width: auto; }
 .vs span { display: grid; font-size: 13px; font-weight: 600; color: var(--muted); }
 .vs b { font-size: 34px; line-height: 1.05; color: var(--soft); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
 .vs .win b { font-size: 52px; color: var(--pri); }
+
+/* ---- sign-in page */
+.auth { display: grid; place-items: center; padding-top: 24px; }
+.authcard { width: min(420px, 100%); display: grid; gap: 22px; padding: 32px 28px; background: var(--card); border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow); }
+.authcard form { display: grid; gap: 14px; }
+.authcard .btn { width: 100%; }
+.authcard > a { justify-self: center; }
+.autherr { margin: 0; padding: 10px 12px; border-radius: 10px; background: #fdeceb; color: var(--err); font-size: 13px; font-weight: 600; }
