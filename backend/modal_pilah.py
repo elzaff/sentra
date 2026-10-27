@@ -22,8 +22,9 @@ import modal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAX_FILES, MAX_BYTES = 24, 12 * 1024 * 1024
-ORIGINS = ["https://www.sentrahub.tech", "https://sentrahub.tech", "https://sentra-ewaste.vercel.app", "https://elzaff.github.io",
-           "http://localhost:8766", "http://127.0.0.1:8766"]
+ORIGINS = ["https://www.sentrahub.tech", "https://sentrahub.tech", "https://sentra-ewaste.vercel.app", "https://elzaff.github.io"]
+# local dev on any port, plus this project's Vercel preview deployments (only the project owner can publish under that scope)
+ORIGIN_RE = r"^http://(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$|^https://sentra-[a-z0-9-]+-elzaffs-projects\.vercel\.app$"
 SUPABASE_URL, ADMIN_UID = "https://qshhmvuuqjuxullvston.supabase.co", "c9b675a2-553e-4ef7-88ec-29bd1ffd4e69"
 SUPABASE_KEY = "sb_publishable_fp8qYzvg3SfM8pWwr67TQQ_MY_ifJYe"  # public by design; the login itself is what is secret
 
@@ -99,8 +100,8 @@ def put_photo(jpeg: bytes) -> str:
     return pid
 
 
-@app.cls(gpu="L4", volumes={"/cache": cache}, secrets=[modal.Secret.from_name("huggingface-secret"), store],
-         scaledown_window=180, timeout=600, max_containers=1)  # public URL: at most one L4, off after 3 idle minutes
+@app.cls(gpu=["L4", "A10", "L40S"], volumes={"/cache": cache}, secrets=[modal.Secret.from_name("huggingface-secret"), store],
+         scaledown_window=180, timeout=600, max_containers=1)  # public URL: at most one GPU, off after 3 idle minutes
 class Pilah:
     @modal.enter()
     def load(self):
@@ -202,7 +203,7 @@ class Pilah:
 
         api = FastAPI(title="CMRE Pilah")
         admin = [Depends(admin_only())]
-        api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
+        api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_origin_regex=ORIGIN_RE, allow_methods=["GET", "POST"], allow_headers=["*"])
 
         @api.get("/health")
         def health():
@@ -295,7 +296,7 @@ def photo():
     from fastapi.responses import RedirectResponse
 
     api = FastAPI(title="SENTRA foto")
-    api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "DELETE"], allow_headers=["*"])
+    api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_origin_regex=ORIGIN_RE, allow_methods=["GET", "DELETE"], allow_headers=["*"])
 
     def check(pid):  # only ids this backend minted; arbitrary keys in the bucket can never be signed
         if not PID.fullmatch(pid):
