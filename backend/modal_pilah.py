@@ -53,7 +53,8 @@ image = (modal.Image.debian_slim(python_version="3.12")
          .pip_install("boto3")  # own layer so the torch layer above stays cached
          .env({"HF_HOME": "/cache/hf"})
          .add_local_file(f"{HERE}/artifacts.npz", "/root/artifacts.npz"))
-light = modal.Image.debian_slim(python_version="3.12").pip_install("boto3", "fastapi[standard]")  # photo service: no GPU stack
+light = (modal.Image.debian_slim(python_version="3.12").pip_install("boto3", "fastapi[standard]", "numpy", "scikit-learn")  # photo + discover service: no GPU stack
+         .add_local_file(f"{HERE}/artifacts.npz", "/root/artifacts.npz"))
 store = modal.Secret.from_name("BucketBiznnet")  # BIZNET_S3_ENDPOINT / REGION / BUCKET / ACCESS_KEY / SECRET_KEY
 app = modal.App("cmre-pilah", image=image)
 cache = modal.Volume.from_name("cmre-pilah-hf", create_if_missing=True)
@@ -67,6 +68,42 @@ IMN = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 def l2(x):
     import numpy as np
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-8)
+
+
+def cluster_groups(z, centres):
+    """Group held photos (CMRE embeddings kept on the device) into candidate new types. Small sets, so
+    average-linkage cosine clustering with K picked by silhouette; one group when there is no structure."""
+    import numpy as np
+    from fastapi import HTTPException
+    from sklearn.cluster import AgglomerativeClustering
+    from sklearn.metrics import silhouette_score
+    Z = np.asarray(z, dtype=np.float32)
+    if Z.ndim != 2 or Z.shape[1] != centres.shape[1]:
+        raise HTTPException(400, "Embedding tidak sesuai.")
+    Z, n = l2(Z), len(Z)
+    lab, sil, k = None, -1.0, 1
+    for kk in range(2, min(8, n - 1) + 1):
+        cand = AgglomerativeClustering(n_clusters=kk, metric="cosine", linkage="average").fit_predict(Z)
+        s = float(silhouette_score(Z, cand, metric="cosine"))
+        if s > sil:
+            lab, sil, k = cand, s, kk
+    if lab is None or sil < 0.1:
+        lab, k = np.zeros(n, int), 1
+    groups = []
+    for g in range(k):
+        m = np.where(lab == g)[0]
+        sim = Z[m] @ Z[m].T
+        coh = float((sim.sum() - len(m)) / (len(m) * (len(m) - 1))) if len(m) > 1 else 1.0
+        dc = np.linalg.norm(centres - Z[m].mean(0), axis=1)
+        groups.append(dict(members=m.tolist(), cohesion=round(coh, 3), nearest=int(dc.argmin()), nearestDist=round(float(dc.min()), 3)))
+    groups.sort(key=lambda g: -len(g["members"]))
+    return {"k": k, "silhouette": round(sil, 3) if k > 1 else None, "groups": groups}
+
+
+@functools.cache
+def centres():
+    import numpy as np
+    return np.load("/root/artifacts.npz")["centres"]
 
 
 # ---- photo storage: private Biznet GIO bucket (S3 API). Keys are server-made random ids, never client input.
@@ -199,7 +236,6 @@ class Pilah:
         from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
         from fastapi.middleware.cors import CORSMiddleware
         from PIL import Image, ImageOps
-        from pydantic import BaseModel, Field
 
         api = FastAPI(title="CMRE Pilah")
         admin = [Depends(admin_only())]
@@ -252,55 +288,31 @@ class Pilah:
             return {"results": [dict(name=nm, pid=p, **r) for nm, p, r in zip(names, pids, out)],
                     "ms": round(1000 * (time.perf_counter() - t0))}
 
-        class Discover(BaseModel):
-            z: list[list[float]] = Field(min_length=4, max_length=400)
-
-        @api.post("/discover", dependencies=admin)
-        def discover(req: Discover):
-            """Group held photos (CMRE embeddings kept on the device) into candidate new types. Small sets, so
-            average-linkage cosine clustering with K picked by silhouette; one group when there is no structure."""
-            from sklearn.cluster import AgglomerativeClustering
-            from sklearn.metrics import silhouette_score
-            np = self.np
-            Z = np.asarray(req.z, dtype=np.float32)
-            if Z.ndim != 2 or Z.shape[1] != self.a["centres"].shape[1]:
-                raise HTTPException(400, "Embedding tidak sesuai.")
-            Z, n = l2(Z), len(Z)
-            lab, sil, k = None, -1.0, 1
-            for kk in range(2, min(8, n - 1) + 1):
-                cand = AgglomerativeClustering(n_clusters=kk, metric="cosine", linkage="average").fit_predict(Z)
-                s = float(silhouette_score(Z, cand, metric="cosine"))
-                if s > sil:
-                    lab, sil, k = cand, s, kk
-            if lab is None or sil < 0.1:
-                lab, k = np.zeros(n, int), 1
-            groups = []
-            for g in range(k):
-                m = np.where(lab == g)[0]
-                sim = Z[m] @ Z[m].T
-                coh = float((sim.sum() - len(m)) / (len(m) * (len(m) - 1))) if len(m) > 1 else 1.0
-                dc = np.linalg.norm(self.a["centres"] - Z[m].mean(0), axis=1)
-                groups.append(dict(members=m.tolist(), cohesion=round(coh, 3), nearest=int(dc.argmin()), nearestDist=round(float(dc.min()), 3)))
-            groups.sort(key=lambda g: -len(g["members"]))
-            return {"k": k, "silhouette": round(sil, 3) if k > 1 else None, "groups": groups}
-
         return api
 
 
-@app.function(image=light, secrets=[store], scaledown_window=120, max_containers=2)
+@app.function(image=light, secrets=[store], scaledown_window=120, max_containers=2, memory=512)
 @modal.asgi_app()
 def photo():
-    """Shows and deletes stored photos without waking the GPU. The bucket stays private: GET redirects to a presigned URL."""
+    """Shows and deletes stored photos and clusters held photos without waking the GPU. The bucket stays private: GET redirects to a presigned URL."""
     from fastapi import Depends, FastAPI, HTTPException, Response
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import RedirectResponse
+    from pydantic import BaseModel, Field
 
     api = FastAPI(title="SENTRA foto")
-    api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_origin_regex=ORIGIN_RE, allow_methods=["GET", "DELETE"], allow_headers=["*"])
+    api.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_origin_regex=ORIGIN_RE, allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"])
 
     def check(pid):  # only ids this backend minted; arbitrary keys in the bucket can never be signed
         if not PID.fullmatch(pid):
             raise HTTPException(404, "Foto tidak ditemukan.")
+
+    class Discover(BaseModel):
+        z: list[list[float]] = Field(min_length=4, max_length=400)
+
+    @api.post("/discover", dependencies=[Depends(admin_only())])
+    def discover(req: Discover):
+        return cluster_groups(req.z, centres())
 
     @api.get("/health")
     def health():

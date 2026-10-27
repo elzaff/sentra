@@ -554,9 +554,8 @@
   async function discover() {
     const P = pool().filter(i => !suggest(i)), btn = main.querySelector("[data-act=discover]");
     if (btn) { btn.disabled = true; btn.textContent = "Clustering…"; }
-    if (!online && !(await ping())) { toast("Server AI offline."); return render(); }
     try {
-      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
+      const r = await fetch(PHOTO + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || r.statusText);
       found = { ...j, ids: P.map(i => i.id) };
