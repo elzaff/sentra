@@ -76,14 +76,14 @@
   const local = (store, v) => store === "sessions" ? v.type === "uji" || v.demo : S.get(v.sid)?.type === "uji" || S.get(v.sid)?.demo;
   async function cloud(store, v, del) {
     const t = await token();
-    if (!t || (!del && local(store, v))) return;  // a failed write is retried at the next start (see pull)
+    if (!t || (!del && (local(store, v) || (store === "items" && v.state !== "hasil")))) return;  // a failed write is retried at the next start (see pull)
     const { img, ...doc } = v;  // the photo blob stays on the device; the bucket holds the copy
     fetch(`${SB}/rest/v1/${store}` + (del ? `?id=eq.${encodeURIComponent(v.id)}` : "?on_conflict=id"), del
       ? { method: "DELETE", headers: sbH(t) }
       : { method: "POST", headers: sbH(t, { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" }), body: JSON.stringify({ id: v.id, doc, updated_at: new Date().toISOString() }) }).catch(() => {});
   }
   // shortcut: cloud rows win over local ones and only the first 1000 rows load, upgrade to paging + updated_at compare if the data grows
-  const pull = () => Promise.all(["sessions", "items", "types", "settings"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
+  const pull = () => Promise.all(["sessions", "items", "types", "settings"].map(t => fetch(`${SB}/rest/v1/${t}?select=doc&limit=1000`, { headers: sbH(null), signal: AbortSignal.timeout(6000) }).then(r => r.ok ? r.json() : Promise.reject()).then(r => r.map(x => x.doc)))).catch(() => null);
   const merge = (mine, theirs) => { const m = new Map(mine.map(x => [x.id, x])); theirs.forEach(d => m.set(d.id, { ...d, ...(m.get(d.id)?.img && { img: m.get(d.id).img }) })); return [...m.values()]; };
 
   let after = "#/";  // where to go once signed in
@@ -137,7 +137,7 @@
   const tag = (r, lg) => `<span class="tag ${r.cls}${lg ? " lg" : ""}">${esc(r.label)}</span>`;
   function status(it) {
     if (it.state === "proses") return ["", "memproses"];
-    if (it.state === "gagal") return ["err", "gagal diproses"];
+    if (it.state === "gagal") return ["err", it.err ? "gagal: " + it.err : "gagal diproses"];
     if (it.conf === "benar") return ["ok", "dikonfirmasi petugas"];
     if (it.conf === "koreksi") return ["ok", "dikoreksi petugas"];
     if (it.res.ood) return ["cek", "perlu dicek"];
@@ -225,14 +225,14 @@
       await putI(it); queue.push(it.id);
     }
     if (bad) toast(`${bad} file tidak terbaca sebagai gambar.`);
-    render(); pump();
+    pump(); render();  // pump first so render sees the warm-up in progress
   }
   async function pump() {
     if (pumping) return;
     pumping = true;
     while (queue.length) {
       if (!online && !(await ping())) {
-        queue.splice(0).forEach(id => { const it = I.get(id); if (it) { it.state = "gagal"; putI(it); } });
+        queue.splice(0).forEach(id => { const it = I.get(id); if (it) { it.state = "gagal"; it.err = "server AI tidak terjangkau"; putI(it); } });
         toast("Server AI offline. Foto tetap tersimpan, tekan Proses ulang nanti.");
         break;
       }
@@ -243,21 +243,22 @@
         const r = await fetch(API + "/predict", { method: "POST", headers: await authH(), body: fd, signal: AbortSignal.timeout(240000) });
         const j = await r.json();
         if (!r.ok) throw new Error(j.detail || r.statusText);
-        part.forEach((it, k) => { const { name, pid, ...res } = j.results[k]; it.res = res; it.pid = pid || it.pid || null; it.state = "hasil"; putI(it); });
+        part.forEach((it, k) => { const { name, pid, ...res } = j.results[k]; it.res = res; it.pid = pid || it.pid || null; it.state = "hasil"; it.err = ""; putI(it); });
       } catch (e) {
-        part.forEach(it => { it.state = "gagal"; putI(it); });
-        toast("Sebagian foto gagal diproses: " + e.message);
+        const why = e.name === "TimeoutError" ? "server AI terlalu lama" : e instanceof TypeError ? "server AI tidak terjangkau" : e.message;  // a TypeError from fetch is a network or CORS block
+        part.forEach(it => { it.state = "gagal"; it.err = why; putI(it); });
+        toast("Sebagian foto gagal diproses: " + why);
       }
       render();
     }
     pumping = false;
   }
   function retry(sid) {
-    itemsOf(sid).filter(i => i.state === "gagal" && i.img).forEach(i => { i.state = "proses"; putI(i); queue.push(i.id); });
+    itemsOf(sid).filter(i => i.state === "gagal" && i.img).forEach(i => { i.state = "proses"; i.err = ""; putI(i); queue.push(i.id); });
     render(); pump();
   }
   function makeSession(type, label = "", place = "") {
-    const n = [...S.values()].filter(x => x.type === type && !x.demo).length + 1;
+    const n = Math.max(0, ...[...S.values()].filter(x => x.type === type && !x.demo).map(x => +(x.no.match(/\d+$/) || [0])[0])) + 1;
     const s = { id: uid(), no: ({ batch: "B-", uji: "U-" }[type] || "S-") + String(n).padStart(3, "0"), type, label, place, created: Date.now(), done: false };
     putS(s);
     return s;
@@ -332,10 +333,10 @@
         <div class="capture" data-drop="home">
           <h1>Pilah e-waste cukup dari foto.</h1>
           <p>Upload foto barang, lalu lihat kategorinya dan apakah termasuk limbah B3. Satu barang per foto, bisa banyak foto sekaligus.</p>
-          <div class="row">${coarse ? `<button class="btn pri big" type="button" data-act="quick-cam">${ico("cam")}Ambil foto</button><button class="btn big" type="button" data-act="quick-files">${ico("img")}Upload foto</button>`
-            : `<button class="btn pri big" type="button" data-act="quick-files">${ico("img")}Upload foto</button>`}
-            <button class="btn big" type="button" data-new="setoran">${ico("doc")}Catat setoran warga</button></div>
-          <p class="small">${coarse ? "" : "Bisa juga drag & drop foto ke sini. "}Belum punya foto? <button class="linkbtn" type="button" data-act="demo">${demo ? "Buka sesi demo" : "Coba demo dengan 12 foto"}</button></p>
+          <div class="row">${!auth ? `<button class="btn pri big" type="button" data-act="login">Masuk untuk upload</button>`
+            : (coarse ? `<button class="btn pri big" type="button" data-act="quick-cam">${ico("cam")}Ambil foto</button><button class="btn big" type="button" data-act="quick-files">${ico("img")}Upload foto</button>`
+              : `<button class="btn pri big" type="button" data-act="quick-files">${ico("img")}Upload foto</button>`) + `<button class="btn big" type="button" data-new="setoran">${ico("doc")}Catat setoran warga</button>`}</div>
+          <p class="small">${auth ? (coarse ? "" : "Bisa juga drag & drop foto ke sini. ") : "Kamu dalam mode lihat saja: semua halaman terbuka, tapi upload dan perubahan data butuh masuk. "}Belum punya foto? <button class="linkbtn" type="button" data-act="demo">${demo ? "Buka sesi demo" : "Coba demo dengan 12 foto"}</button></p>
         </div>
       </section>
       <section class="section"><div class="sechead"><h2>Hari ini</h2>${todayItems.length ? `<a href="#/riwayat">Riwayat</a>` : ""}</div>
@@ -384,7 +385,7 @@
         <div class="filters" role="group" aria-label="Saring barang">${F.map(fbtn).join("")}${RF.length ? '<div class="cap">Per jalur</div>' + RF.map(fbtn).join("") : ""}</div>
         <div>
           ${adding}
-          ${t.run ? `<p class="note"><span class="spin"></span>Memproses ${t.run} foto…</p>` : ""}
+          ${t.run ? `<p class="note"><span class="spin"></span>Memproses ${t.run} foto…${pinging ? " Server AI sedang menyala, foto pertama bisa butuh sekitar 1 menit." : ""}</p>` : ""}
           ${t.fail ? `<p class="note">${t.fail} foto belum diproses. <button class="btn sm" type="button" data-act="retry">Proses ulang</button></p>` : ""}
           ${last ? latest(last) : ""}
           ${batch && !s.done && open.length ? `<div class="bulk"><label><input type="checkbox" data-act="pickall" ${open.every(i => picked.has(i.id)) ? "checked" : ""}>Pilih ${open.length} hasil yang belum dikonfirmasi</label>
@@ -553,9 +554,8 @@
   async function discover() {
     const P = pool().filter(i => !suggest(i)), btn = main.querySelector("[data-act=discover]");
     if (btn) { btn.disabled = true; btn.textContent = "Clustering…"; }
-    if (!online && !(await ping())) { toast("Server AI offline."); return render(); }
     try {
-      const r = await fetch(API + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
+      const r = await fetch(PHOTO + "/discover", { method: "POST", headers: { "Content-Type": "application/json", ...await authH() }, body: JSON.stringify({ z: P.map(i => i.res.z) }), signal: AbortSignal.timeout(120000) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.detail || r.statusText);
       found = { ...j, ids: P.map(i => i.id) };
@@ -699,6 +699,7 @@
     else if (a === "cam") $(coarse ? "#pickCam" : "#pickFiles").click();
     else if (a === "files") $("#pickFiles").click();
     else if (a === "pick-dir") $("#pickDir").click();
+    else if (a === "login") goLogin();
     else if (a === "discover") discover();
     else if (a === "not-ewaste") { applyGroup(+el.dataset.group, "bukan"); toast("Ditandai bukan e-waste."); }
     else if (a === "learn-all") { const t = typeOf(el.dataset.type), its = pool().filter(i => suggest(i)?.id === t.id); its.forEach(i => toType(i, t)); render(); toast(`${its.length} barang masuk ${t.name}.`); }
@@ -762,6 +763,17 @@
     addFiles(sid, e.dataTransfer.files);
   });
   addEventListener("hashchange", () => { if (dlg.open) dlg.close(); render(); if (!main.hidden) main.focus({ preventScroll: true }); scrollTo(0, 0); });
+
+  async function refresh() {
+    const r = await pull();
+    if (!r) return;
+    r[0].forEach(d => S.set(d.id, d));
+    r[1].forEach(d => { const o = I.get(d.id); if (o?.state !== "proses") I.set(d.id, { ...d, ...(o?.img && { img: o.img }) }); });  // keep the local photo; leave running uploads alone
+    TY = merge(TY, r[2]); cache("erase-types", TY);
+    const cu = r[3].find(d => d.id === "unit"); if (cu) { UN = { unit: cu.unit, officer: cu.officer }; cache("cmre-unit", UN); }
+    if (!dlg.open && !document.activeElement?.matches?.("input,select,textarea")) render();
+  }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
   // ================= start =================
   Promise.all([tx("sessions", "readonly", s => s.getAll()), tx("items", "readonly", s => s.getAll()), pull()]).then(([ss, its, remote]) => {
