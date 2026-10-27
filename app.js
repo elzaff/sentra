@@ -288,7 +288,7 @@
     if (!location.hash.startsWith("#/") && h[0] && !researchPage.hidden && researchContent.shadowRoot?.getElementById(h[0])) return;
     const inResearch = h[0] === "riset";
     main.hidden = inResearch; researchPage.hidden = !inResearch;
-    const nav = { riwayat: "riwayat", jenis: "jenis", baru: "baru", uji: "riset", riset: "riset", "": "home" }[h[0]] || "";
+    const nav = { riwayat: "riwayat", jenis: "jenis", kategori: "jenis", baru: "baru", uji: "riset", riset: "riset", "": "home" }[h[0]] || "";
     document.querySelectorAll("[data-nav]").forEach(a => a.dataset.nav === nav ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
     document.querySelectorAll("[data-riset-sub]").forEach(a => a.dataset.risetSub === (h[1] || "beranda") && h[0] === "riset" ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
     if (h[0] === "s" && S.has(h[1])) {
@@ -300,7 +300,7 @@
     view = {};
     if (h[0] === "cara-kerja") return location.replace("#/riset/cara-kerja");  // old links: the walkthrough moved into the dashboard
     if (h[0] === "riset") return dashboard();
-    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup, masuk: masuk }[h[0]] || home)();
+    return ({ riwayat: history, jenis: jenis, baru: jenisBaru, uji: ujiSetup, masuk: masuk, kategori: tipe }[h[0]] || home)();
   }
 
   // ================= views =================
@@ -481,9 +481,19 @@
       <div class="head"><div class="t"><h1>Kategori</h1><p class="meta">SENTRA mengenali 16 kategori. Kategori ini hasil clustering 3.792 foto BDC tanpa label; tim memberi nama sesudahnya. <a href="#/riset/k17">Peta 16 cluster dan alasan memilih K = 16 ada di dashboard riset.</a></p></div></div>
       ${group("Jalur B3", C.filter(c => c.b3))}${group("Jalur non-B3", C.filter(c => !c.b3))}
       <section class="jgroup"><div class="sechead"><h2>Kategori baru</h2><a href="#/baru">Cluster barang yang perlu dicek</a></div>
-        ${types().length ? `<div class="rows">${types().map(t => `<div class="srow"><span>${tag({ label: (t.b3 ? "B3 · " : "Non-B3 · ") + t.name, cls: t.b3 ? "b3" : "" })}</span>
-          <span class="r">${[...I.values()].filter(i => i.newType === t.id).length} barang · ditemukan ${short(t.created)}</span></div>`).join("")}</div>`
+        ${types().length ? `<div class="rows">${types().map(t => `<a class="srow" href="#/kategori/${t.id}"><span>${tag({ label: (t.b3 ? "B3 · " : "Non-B3 · ") + t.name, cls: t.b3 ? "b3" : "" })}</span>
+          <span class="r">${[...I.values()].filter(i => i.newType === t.id).length} barang · ditemukan ${short(t.created)}</span></a>`).join("")}</div>`
           : `<p class="empty">Belum ada. Barang yang tidak cocok dengan 16 kategori masuk status perlu dicek, lalu bisa di-cluster jadi kategori baru.</p>`}</section></div>`;
+  }
+  function tipe() {
+    const t = typeOf(location.hash.split("/")[2]);
+    if (!t) return location.replace("#/jenis");
+    const its = [...I.values()].filter(i => i.newType === t.id && S.has(i.sid)).sort((a, b) => b.t - a.t);
+    main.innerHTML = `<div class="page">
+      <div class="head"><a class="iconbtn" href="#/jenis" aria-label="Kembali ke Kategori">${ico("back")}</a>
+        <div class="t"><h1>${esc(t.name)}</h1><p class="meta">Kategori baru · ditemukan ${short(t.created)}</p></div>${typeTag(t, true)}</div>
+      ${its.length ? sumLine(tally(its)) : ""}
+      ${its.length ? `<div class="list">${its.map(i => row(i)).join("")}</div>` : `<p class="empty">Belum ada barang di kategori ini.</p>`}</div>`;
   }
   function jenisDialog(c) {
     dlg.innerHTML = `<div class="dlg"><div class="top"><h2 id="dlgTitle">${esc(c.name)}</h2><button class="iconbtn" type="button" data-close aria-label="Tutup">${ico("x")}</button></div>
